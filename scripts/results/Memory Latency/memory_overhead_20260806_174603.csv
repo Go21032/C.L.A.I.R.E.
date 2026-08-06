@@ -1,0 +1,10 @@
+﻿condition,run,elapsed_s,vram_peak_mib,vram_avg_mib,gpu_util_peak_pct,sample_count
+memory_enabled=False(DEEP),1,34.49,15750,15742.6,65,172
+memory_enabled=False(DEEP),2,32.348,15751,15724.4,61,161
+memory_enabled=False(DEEP),3,33.405,15738,15719.7,63,166
+memory_enabled=True(DEEP・検索あり),1,32.923,15745,15728.5,60,164
+memory_enabled=True(DEEP・検索あり),2,33.59,15740,15717.7,61,167
+memory_enabled=True(DEEP・検索あり),3,31.556,15745,15728.6,61,157
+OFF平均,-,33.414,15751,,,
+ON平均,-,32.69,15745,,,
+上乗せ(ON-OFF),-,-0.725,-6,,,

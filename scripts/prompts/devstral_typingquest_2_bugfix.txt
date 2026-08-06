@@ -1,0 +1,178 @@
+あなたはScratch 3.0のproject.json形式に詳しいプログラミング講師です。
+以下は、既存の完成済みタイピングゲーム(タイピングゲーム【完成版】.sb3)のStageターゲットの
+blocks定義(実際のproject.jsonから抜粋した本物のJSON)です。
+
+本来の仕様は次の通りです。
+- 「ゲームスタート」を受け取ったらBGMを音量100でループ再生する
+- 「ゲームオーバー」を受け取ったら音量を0にしてBGMを止める(ゲームオーバー演出の効果音と被らないようにするため)
+- 「ステージクリア」を受け取ったときも同様に音量を0にする
+- 「ゲームクリア」を受け取ったら背景をLightに切り替える
+
+しかし実際にScratchで動かすと、ゲームオーバー時にBGMの音量が下がらず、ゲームオーバー効果音と
+BGMが同時に鳴ってうるさい、という不具合が報告されています。
+
+# 現状のStageターゲットのblocks(project.jsonから抜粋)
+```json
+{
+  "3l15|}7(W[Oq^9keoF9_": {
+    "opcode": "event_whenflagclicked",
+    "next": "l,-x-;{54h|J~Qa]gArl",
+    "parent": null,
+    "inputs": {},
+    "fields": {},
+    "shadow": false,
+    "topLevel": true,
+    "x": 182,
+    "y": 190
+  },
+  "l,-x-;{54h|J~Qa]gArl": {
+    "opcode": "looks_switchbackdropto",
+    "next": null,
+    "parent": "3l15|}7(W[Oq^9keoF9_",
+    "inputs": { "BACKDROP": [1, "m)Fi4GQhm/maXscmCLJP"] },
+    "fields": {},
+    "shadow": false,
+    "topLevel": false
+  },
+  "m)Fi4GQhm/maXscmCLJP": {
+    "opcode": "looks_backdrops",
+    "next": null,
+    "parent": "l,-x-;{54h|J~Qa]gArl",
+    "inputs": {},
+    "fields": { "BACKDROP": ["背景1", null] },
+    "shadow": true,
+    "topLevel": false
+  },
+  "DKp(yP?hj`?n1c~VbtnX": {
+    "opcode": "event_whenbroadcastreceived",
+    "next": "eC21T~$vhHkvuy?@e4#E",
+    "parent": null,
+    "inputs": {},
+    "fields": { "BROADCAST_OPTION": ["ゲームクリア", "+B,BS96wl_YUz!EsIdr@"] },
+    "shadow": false,
+    "topLevel": true,
+    "x": 186,
+    "y": 387
+  },
+  "eC21T~$vhHkvuy?@e4#E": {
+    "opcode": "sound_setvolumeto",
+    "next": "YQS(2itRox{pwE!CmlS]",
+    "parent": "DKp(yP?hj`?n1c~VbtnX",
+    "inputs": { "VOLUME": [1, [4, "0"]] },
+    "fields": {},
+    "shadow": false,
+    "topLevel": false
+  },
+  "YQS(2itRox{pwE!CmlS]": {
+    "opcode": "looks_switchbackdropto",
+    "next": null,
+    "parent": "eC21T~$vhHkvuy?@e4#E",
+    "inputs": { "BACKDROP": [1, "O[FhL@Io^byeS[_@xe!Q"] },
+    "fields": {},
+    "shadow": false,
+    "topLevel": false
+  },
+  "O[FhL@Io^byeS[_@xe!Q": {
+    "opcode": "looks_backdrops",
+    "next": null,
+    "parent": "YQS(2itRox{pwE!CmlS]",
+    "inputs": {},
+    "fields": { "BACKDROP": ["Light", null] },
+    "shadow": true,
+    "topLevel": false
+  },
+  "HFi^bEm]w]RvQL[)/QGq": {
+    "opcode": "event_whenbroadcastreceived",
+    "next": "xwj{-VzgL75}.Nl:R1#O",
+    "parent": null,
+    "inputs": {},
+    "fields": { "BROADCAST_OPTION": ["ゲームスタート", "?,_5__Tf%$]On:F|k|rP"] },
+    "shadow": false,
+    "topLevel": true,
+    "x": 185,
+    "y": 624
+  },
+  "xwj{-VzgL75}.Nl:R1#O": {
+    "opcode": "sound_setvolumeto",
+    "next": "`-|MN,{r=I-.(!UaGN9c",
+    "parent": "HFi^bEm]w]RvQL[)/QGq",
+    "inputs": { "VOLUME": [1, [4, "100"]] },
+    "fields": {},
+    "shadow": false,
+    "topLevel": false
+  },
+  "`-|MN,{r=I-.(!UaGN9c": {
+    "opcode": "control_forever",
+    "next": null,
+    "parent": "xwj{-VzgL75}.Nl:R1#O",
+    "inputs": { "SUBSTACK": [2, ")poHNM`sbWwr}I=)}iN|"] },
+    "fields": {},
+    "shadow": false,
+    "topLevel": false
+  },
+  ")poHNM`sbWwr}I=)}iN|": {
+    "opcode": "sound_playuntildone",
+    "next": null,
+    "parent": "`-|MN,{r=I-.(!UaGN9c",
+    "inputs": { "SOUND_MENU": [1, "BtyXE$MvMrC59AB@|*I~"] },
+    "fields": {},
+    "shadow": false,
+    "topLevel": false
+  },
+  "BtyXE$MvMrC59AB@|*I~": {
+    "opcode": "sound_sounds_menu",
+    "next": null,
+    "parent": ")poHNM`sbWwr}I=)}iN|",
+    "inputs": {},
+    "fields": { "SOUND_MENU": ["Video Game 1", null] },
+    "shadow": true,
+    "topLevel": false
+  },
+  "v-joF]@$7~A2~mC#3D|,": {
+    "opcode": "event_whenbroadcastreceived",
+    "next": "l$Cz}15b9?j1Z;I3?g(_",
+    "parent": null,
+    "inputs": {},
+    "fields": { "BROADCAST_OPTION": ["ステージクリア", "y.*5cbc_^PGZsfs%tQPG"] },
+    "shadow": false,
+    "topLevel": true,
+    "x": 188,
+    "y": 929
+  },
+  "l$Cz}15b9?j1Z;I3?g(_": {
+    "opcode": "sound_setvolumeto",
+    "next": null,
+    "parent": "v-joF]@$7~A2~mC#3D|,",
+    "inputs": { "VOLUME": [1, [4, "0"]] },
+    "fields": {},
+    "shadow": false,
+    "topLevel": false
+  },
+  "1v2Gm,5f%9FDZcX0;h(~": {
+    "opcode": "event_whenbroadcastreceived",
+    "next": "y[GTP]K/lYs:)5xk[$59",
+    "parent": null,
+    "inputs": {},
+    "fields": { "BROADCAST_OPTION": ["ゲームオーバー", "_!dTfgh`{2]4SWA8_yAK"] },
+    "shadow": false,
+    "topLevel": true,
+    "x": 193,
+    "y": 1188
+  },
+  "y[GTP]K/lYs:)5xk[$59": {
+    "opcode": "sound_setvolumeto",
+    "next": null,
+    "parent": "1v2Gm,5f%9FDZcX0;h(~",
+    "inputs": { "VOLUME": [1, [4, "100"]] },
+    "fields": {},
+    "shadow": false,
+    "topLevel": false
+  }
+}
+```
+
+# 依頼内容
+1. 「ゲームオーバー」を受け取ったときのスクリプト(ブロックID "1v2Gm,5f%9FDZcX0;h(~" → "y[GTP]K/lYs:)5xk[$59")に
+   バグが仕込まれています。原因のブロックIDと、何が本来の仕様と食い違っているかを具体的に指摘してください。
+2. 修正後のブロックのJSON(該当ブロックのみでよい)を出力してください。
+3. 同じ間違いが他のブロックに紛れていないか、このJSON全体を見て確認してください。

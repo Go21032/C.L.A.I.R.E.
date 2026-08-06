@@ -1,0 +1,4 @@
+db_path: "D:/sapo_ai/rag_memory/db"
+embed_model: "kun432/cl-nagoya-ruri-base"
+doc_prefix: "文章: "
+query_prefix: "クエリ: "

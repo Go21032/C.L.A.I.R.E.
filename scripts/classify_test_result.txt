@@ -1,0 +1,8 @@
+'私の猫の名前は何ですか？' -> ['FAST', 'FAST', 'FAST']
+'昨日やった残りの課題を教えて' -> ['CLARIFY', 'CLARIFY', 'CLARIFY']
+'さっき話してたやつどうなった？' -> ['CLARIFY', 'CLARIFY', 'CLARIFY']
+'私の亀の名前は何ですか？' -> ['CLARIFY', 'CLARIFY', 'CLARIFY']
+'前に言ってたパスワードなんだっけ？' -> ['CLARIFY', 'CLARIFY', 'CLARIFY']
+'この前決めたチャンク分割の上限値って何字だっけ？' -> ['CLARIFY', 'CLARIFY', 'CLARIFY']
+'あれ、どうすればいい？' -> ['CLARIFY', 'CLARIFY', 'CLARIFY']
+'これ' -> ['CLARIFY', 'CLARIFY', 'CLARIFY']

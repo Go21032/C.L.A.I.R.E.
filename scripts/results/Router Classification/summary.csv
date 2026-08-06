@@ -1,0 +1,12 @@
+﻿timestamp,label,system_prompt,total,correct,accuracy_pct,fast_correct,fast_total,deep_correct,deep_total,code_correct,code_total,clarify_correct,clarify_total,detail_csv
+2026-08-04T22:18:48,system_prompt_v1,system_prompt_v1.txt,20,16,80.0,5,5,5,5,6,6,0,4,system_prompt_v1_20260804_221848_detail.csv
+2026-08-04T22:19:42,system_prompt_v2,system_prompt_v2.txt,20,17,85.0,3,5,4,5,6,6,4,4,system_prompt_v2_20260804_221942_detail.csv
+2026-08-04T22:29:03,system_prompt_v2,system_prompt_v2.txt,20,16,80.0,2,5,4,5,6,6,4,4,system_prompt_v2_20260804_222903_detail.csv
+2026-08-04T22:32:08,system_prompt_v2_run3,system_prompt_v2.txt,20,16,80.0,2,5,4,5,6,6,4,4,system_prompt_v2_run3_20260804_223208_detail.csv
+2026-08-04T22:38:00,system_prompt_v2_run3,system_prompt_v2.txt,20,18,90.0,3,5,5,5,6,6,4,4,system_prompt_v2_run3_20260804_223800_detail.csv
+2026-08-04T23:03:48,system_prompt_v3_run3,system_prompt_v3.txt,20,19,95.0,5,5,5,5,6,6,3,4,system_prompt_v3_run3_20260804_230348_detail.csv
+2026-08-04T23:10:45,system_prompt_v3_run3,system_prompt_v3.txt,20,20,100.0,5,5,5,5,6,6,4,4,system_prompt_v3_run3_20260804_231045_detail.csv
+2026-08-04T23:14:00,system_prompt_v3_run3,system_prompt_v3.txt,20,20,100.0,5,5,5,5,6,6,4,4,system_prompt_v3_run3_20260804_231400_detail.csv
+2026-08-04T23:33:37,code_triggers_v2_check,system_prompt_v3.txt,20,19,95.0,5,5,5,5,6,6,3,4,code_triggers_v2_check_20260804_233337_detail.csv
+2026-08-04T23:34:35,code_triggers_v2_check2,system_prompt_v3.txt,20,20,100.0,5,5,5,5,6,6,4,4,code_triggers_v2_check2_20260804_233435_detail.csv
+2026-08-04T23:48:25,code_triggers_v2_check2,system_prompt_v3.txt,20,19,95.0,5,5,5,5,6,6,3,4,code_triggers_v2_check2_20260804_234825_detail.csv

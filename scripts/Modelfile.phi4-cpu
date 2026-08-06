@@ -1,0 +1,2 @@
+﻿FROM phi4-mini:latest
+PARAMETER num_gpu 0
