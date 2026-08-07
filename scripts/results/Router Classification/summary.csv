@@ -10,3 +10,8 @@
 2026-08-04T23:33:37,code_triggers_v2_check,system_prompt_v3.txt,20,19,95.0,5,5,5,5,6,6,3,4,code_triggers_v2_check_20260804_233337_detail.csv
 2026-08-04T23:34:35,code_triggers_v2_check2,system_prompt_v3.txt,20,20,100.0,5,5,5,5,6,6,4,4,code_triggers_v2_check2_20260804_233435_detail.csv
 2026-08-04T23:48:25,code_triggers_v2_check2,system_prompt_v3.txt,20,19,95.0,5,5,5,5,6,6,3,4,code_triggers_v2_check2_20260804_234825_detail.csv
+2026-08-07T21:31:53,gemma4_e4b,system_prompt_v3.txt,20,20,100.0,5,5,5,5,6,6,4,4,gemma4_e4b_20260807_213153_detail.csv
+2026-08-07T21:32:41,gemma4_e2b_nothink,system_prompt_v3.txt,20,19,95.0,5,5,5,5,6,6,3,4,gemma4_e2b_nothink_20260807_213241_detail.csv
+2026-08-07T21:33:33,gemma4_e2b_thinkdefault,system_prompt_v3.txt,20,19,95.0,5,5,5,5,6,6,3,4,gemma4_e2b_thinkdefault_20260807_213333_detail.csv
+2026-08-07T21:44:43,gemma4_e4b,system_prompt_v3.txt,20,20,100.0,5,5,5,5,6,6,4,4,gemma4_e4b_20260807_214443_detail.csv
+2026-08-07T21:58:39,gemma4_e4b_cpu_nothink,system_prompt_v3.txt,20,20,100.0,5,5,5,5,6,6,4,4,gemma4_e4b_cpu_nothink_20260807_215839_detail.csv

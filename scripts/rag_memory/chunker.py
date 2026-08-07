@@ -32,10 +32,21 @@ def chunk_utterance(text: str) -> list[str]:
 
 
 def chunk_markdown(text: str) -> list[str]:
-    """Markdownを見出し(#〜######)単位で分割する。見出し行はチャンク先頭に残す
-    (「何についての記述か」という文脈をベクトルに含めるため)。"""
+    """Markdownを見出し(#〜######)単位で分割する。
+
+    見出し配下が長く機械分割される場合、2チャンク目以降にも見出し行を
+    再付与して「何についての記述か」という文脈を保持する(7日目③)。
+    """
     parts = re.split(r"(?m)^(?=#{1,6}\s)", text)
     chunks: list[str] = []
     for part in parts:
-        chunks.extend(_split_by_length(part))
+        lines = part.split("\n", 1)
+        heading = lines[0] if re.match(r"^#{1,6}\s", lines[0]) else ""
+        pieces = _split_by_length(part)
+        for i, piece in enumerate(pieces):
+            # 1つ目は元々見出しを含んでいるのでそのまま。
+            # 2つ目以降は見出しを失っているため先頭に付け直す。
+            if i > 0 and heading and not piece.startswith(heading):
+                piece = f"{heading}\n{piece}"
+            chunks.append(piece)
     return chunks

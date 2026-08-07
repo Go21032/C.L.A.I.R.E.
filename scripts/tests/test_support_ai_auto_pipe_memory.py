@@ -131,7 +131,9 @@ class TestSupportAiAutoPipeMemory(unittest.TestCase):
         pipe.pipe(make_body("前に渡したスクリプトのバグを直して"))
 
         self.assertEqual(len(recording.retrieve_calls), 1)
-        self.assertEqual(recording.retrieve_calls[0]["route"], "CODE")  # CODEはroute絞り込みする
+        # 7日目⑤: CODEはCODEとNOTE両方に絞り込む(NOTEを除外するとノート由来の
+        # 記憶が一切ヒットしなくなる設計上の衝突が実データ検証で判明したため)
+        self.assertEqual(recording.retrieve_calls[0]["route"], ("CODE", "NOTE"))
         # ⑤の注意点: CODE_ACTION_SYSTEM_PROMPTが上書きされず、記憶文脈と連結されていること
         self.assertIn(support_ai_auto_pipe.CODE_ACTION_SYSTEM_PROMPT, captured["system"])
         self.assertIn("前に書いたスクリプトの内容", captured["system"])

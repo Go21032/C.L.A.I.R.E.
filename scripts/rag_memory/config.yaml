@@ -2,3 +2,8 @@ db_path: "D:/sapo_ai/rag_memory/db"
 embed_model: "kun432/cl-nagoya-ruri-base"
 doc_prefix: "文章: "
 query_prefix: "クエリ: "
+max_chars: 400
+overlap: 80
+max_distance: 0.45
+vault_root: "C:/Users/gakuh/Documents/obsidian"
+ingest_default_path: "サポートAI作製計画"

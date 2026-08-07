@@ -204,16 +204,30 @@ def parse_verbose_output(text: str) -> dict:
     return result
 
 
-def execute_ollama_run(model: str, prompt: str, interval: float) -> dict:
+def execute_ollama_run(model: str, prompt: str, interval: float, think: str | None = None) -> dict:
     """`ollama run --verbose`を実行しつつGPUをサンプリングし、統計をまとめて返す
     共通ヘルパー(通常モード・スワップモード両方から使う)。
+
+    think: `ollama run --think <true|false>` を明示的に渡したい場合に指定する
+    (7日目⓪:`ollama run <model> --help`に`--think string[="true"]`フラグが
+    存在することを確認済み。gemma4:e2bのthinkingモード有無を速度計測でも
+    揃えるために使用)。Noneならフラグを付けずモデル既定値のまま実行する。
     """
+    cmd = ["ollama", "run", model, "--verbose"]
+    if think is not None:
+        # `--think string[="true"]` はcobraの「値省略可」フラグのため、
+        # `--think false` のようにスペース区切りで渡すと値を消費してくれず、
+        # "false" がPROMPT側の余分な引数として紛れ込む(実機で確認済みの罠)。
+        # 必ず `--think=false` の=区切りで渡すこと。
+        cmd.append(f"--think={think}")
+    cmd.append(prompt)
+
     sampler = GpuSampler(interval=interval)
     sampler.start()
 
-    print(f"[info] running: ollama run {model} --verbose \"{prompt}\"")
+    print(f"[info] running: {' '.join(cmd[:-1])} \"{prompt}\"")
     proc = subprocess.run(
-        ["ollama", "run", model, "--verbose", prompt],
+        cmd,
         capture_output=True,
         text=True,
         encoding="utf-8",
@@ -246,10 +260,12 @@ def execute_ollama_run(model: str, prompt: str, interval: float) -> dict:
     }
 
 
-def run_and_monitor(model: str, prompt: str, label: str, interval: float) -> dict:
+def run_and_monitor(
+    model: str, prompt: str, label: str, interval: float, think: str | None = None
+) -> dict:
     FUNCTIONAL_DIR.mkdir(parents=True, exist_ok=True)
 
-    run_result = execute_ollama_run(model, prompt, interval)
+    run_result = execute_ollama_run(model, prompt, interval, think=think)
     combined_output = run_result["combined_output"]
     verbose_stats = run_result["verbose_stats"]
     samples = run_result["samples"]
@@ -523,6 +539,15 @@ def main():
         "--label", default=None, help="記録用のラベル(未指定ならモデル名を使用)"
     )
     parser.add_argument(
+        "--think",
+        default=None,
+        choices=["true", "false"],
+        help=(
+            "`ollama run --think <true|false>` を明示的に渡す(gemma4:e2b等の"
+            "thinkingモード有無で速度・VRAMを比較する場合に使用。未指定ならフラグなし=モデル既定値)"
+        ),
+    )
+    parser.add_argument(
         "--interval", type=float, default=1.0, help="nvidia-smiのポーリング間隔(秒)"
     )
     parser.add_argument(
@@ -589,7 +614,9 @@ def main():
     rows = []
     for i in range(1, args.repeat + 1):
         run_label = base_label if args.repeat == 1 else f"{base_label}_run{i}"
-        rows.append(run_and_monitor(args.model, args.prompt, run_label, args.interval))
+        rows.append(
+            run_and_monitor(args.model, args.prompt, run_label, args.interval, think=args.think)
+        )
 
     if args.repeat > 1:
         numeric_keys = [

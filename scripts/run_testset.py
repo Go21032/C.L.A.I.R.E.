@@ -17,6 +17,8 @@ CODE_TRIGGERSに一致する質問はPhi-4-miniを呼ばずルールベースで
     python run_testset.py
     python run_testset.py --label system_prompt_v2
     python run_testset.py --system-prompt prompts/router_classification/system_prompt_v2.txt
+    python run_testset.py --model gemma4:e4b --label gemma4_e4b
+    python run_testset.py --model gemma4:e2b --think false --label gemma4_e2b_nothink
 """
 
 from __future__ import annotations
@@ -104,7 +106,31 @@ def main() -> None:
             "(未指定ならrouter.pyのデフォルト=SYSTEM_PROMPT_PATHをそのまま使う)"
         ),
     )
+    parser.add_argument(
+        "--model",
+        default=None,
+        help=(
+            "分類に使うOllamaモデルを差し替える(未指定ならrouter.ROUTER_MODEL="
+            f"{router.ROUTER_MODEL!r} をそのまま使う。gemma4:e4b/gemma4:e2b等の"
+            "ルーター候補評価用)"
+        ),
+    )
+    parser.add_argument(
+        "--think",
+        default=None,
+        choices=["true", "false"],
+        help=(
+            "Ollama /api/generate のトップレベルthinkフィールドを明示指定する"
+            "(gemma4:e2b等、既定でthinkingモードが有効なモデルをthink:false固定で"
+            "評価する場合に使用。未指定ならthinkフィールドを送らずモデル既定値のまま)"
+        ),
+    )
     args = parser.parse_args()
+
+    if args.model:
+        router.ROUTER_MODEL = args.model
+    if args.think is not None:
+        router.ROUTER_THINK = args.think == "true"
 
     if args.system_prompt:
         prompt_path = Path(args.system_prompt)

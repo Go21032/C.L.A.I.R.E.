@@ -1,3 +1,4 @@
 __pycache__/
 *.pyc
 scripts/.webui_secret_key
+.webui_secret_key

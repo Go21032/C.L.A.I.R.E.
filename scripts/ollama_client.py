@@ -34,6 +34,7 @@ def generate(
     keep_alive: int | str = -1,
     timeout: float = 60.0,
     options: dict | None = None,
+    think: bool | None = None,
 ) -> str:
     """/api/generate を1回だけ叩き、レスポンステキストを返す(stream=False)。
 
@@ -42,6 +43,11 @@ def generate(
     呼び出しごとに出力がぶれる(router.pyの分類のような決定性が欲しい
     用途ではoptions={"temperature": 0}等を明示すること。6日目ノート
     「マツコ問題」の根本原因の対応)。
+
+    think: Ollama /api/generate のトップレベル`think`フィールド。
+    gemma4:e2b等、既定でthinkingモード(内部CoT)が有効なモデルを
+    think:false固定で呼び出したい場合に指定する(7日目⓪)。
+    Noneなら`think`フィールド自体を送らず、モデルの既定値に委ねる。
     """
     body: dict = {
         "model": model,
@@ -53,6 +59,8 @@ def generate(
         body["system"] = system
     if options:
         body["options"] = options
+    if think is not None:
+        body["think"] = think
 
     data = json.dumps(body).encode("utf-8")
     req = urllib.request.Request(

@@ -283,10 +283,15 @@ class Pipe:
         if memory_store is None or not self.valves.memory_enabled or route not in self.RETRIEVE_ROUTES:
             return ""
         try:
+            # 7日目⑤: CODEルートを`route='CODE'`のみに絞ると、role='note'/
+            # route='NOTE'で取り込んだノート由来の記憶(このプロジェクトの
+            # 設計ノートはコード関連の記述が中心)が一切ヒットしなくなる
+            # 設計上の衝突が実データ検証で判明したため、CODEルートは
+            # CODEとNOTEの両方に絞り込む。
             hits = memory_store.retrieve(
                 user_text,
                 limit=self.valves.memory_top_k,
-                route="CODE" if route == "CODE" else None,
+                route=("CODE", "NOTE") if route == "CODE" else None,
             )
             return memory_store.format_context(hits)
         except Exception as e:  # 記憶レイヤーの障害で本体を止めない(④完了条件)

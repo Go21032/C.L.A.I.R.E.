@@ -71,8 +71,17 @@ def append_turn(chat_id: str, role: str, route: str, text: str, topic: str = "")
     return len(rows)
 
 
-def retrieve(query: str, limit: int = 3, route: str | None = None) -> list[dict]:
-    """クエリに意味的に近い過去の記憶を返す。routeを渡すとそのrouteに絞り込む。"""
+def retrieve(
+    query: str, limit: int = 3, route: str | tuple[str, ...] | list[str] | None = None
+) -> list[dict]:
+    """クエリに意味的に近い過去の記憶を返す。
+
+    routeに文字列を渡すとそのrouteだけに絞り込む。tuple/listを渡すと
+    そのいずれかのrouteに一致する行に絞り込む(7日目⑤: CODEルートで
+    `route='CODE'`のみに絞ると、role='note'/route='NOTE'で取り込んだ
+    ノート由来の記憶が一切ヒットしなくなる設計上の衝突が判明したため、
+    `route=("CODE", "NOTE")`のように複数routeを渡せるようにした)。
+    """
     table = _table()
     if table.count_rows() == 0:
         # ②の警告どおり、db_path誤指定で空DBが新規作成された場合をここで検出する
@@ -80,7 +89,11 @@ def retrieve(query: str, limit: int = 3, route: str | None = None) -> list[dict]
         return []
     search = table.search(embed(query, is_query=True))
     if route:
-        search = search.where(f"route = '{route}'")
+        if isinstance(route, str):
+            search = search.where(f"route = '{route}'")
+        else:
+            in_list = ", ".join(f"'{r}'" for r in route)
+            search = search.where(f"route IN ({in_list})")
     df = search.limit(limit).to_pandas()
     return df[["content", "date", "role", "route", "_distance"]].to_dict("records")
 

@@ -32,10 +32,21 @@ from router_rules import match_rule_based
 SCRIPT_DIR = Path(__file__).resolve().parent
 SYSTEM_PROMPT_PATH = SCRIPT_DIR / "prompts" / "router_classification" / "system_prompt_v3.txt"
 
-# 2日目ノートの検証結果を踏まえ、ルーター自身(Phi-4-mini)はCPU固定(num_gpu 0)版を
-# keep_alive=-1で常駐させる(Modelfile.phi4-cpu参照)。GPU版のphi4-mini:latestを使うと
-# FAST/DEEP/CODEのモデルスワップ時にVRAMを奪い合ってしまうため。
-ROUTER_MODEL = "phi4-mini-cpu:latest"
+# 7日目⓪の評価結果を踏まえ、ルーターを phi4-mini-cpu から gemma4-e4b-cpu(CPU固定版)に
+# 差し替えた(testset_v1 20問で正答率100%、Phi-4-mini比で速度も同等以上)。
+# 2日目ノートの検証結果と同じ理由(num_gpu 0のModelfileでCPU固定・keep_alive=-1で常駐)により、
+# GPU版のgemma4:e4bをそのまま使うと FAST/DEEP/CODE(gpt-oss:20b/gemma4:26b/devstral-small-2:24b)
+# とのVRAM奪い合いが発生する(GPU版は約9.9GB占有・CPU固定版は約2.8GBに圧縮できることを
+# monitor_ollama.pyで実測済み)。CPU固定版は`Modelfile.gemma4-e4b-cpu`から
+# `ollama create gemma4-e4b-cpu -f Modelfile.gemma4-e4b-cpu`で作成する。
+ROUTER_MODEL = "gemma4-e4b-cpu:latest"
+
+# gemma4系はOllama既定でthinkingモード(内部CoT)が有効なため、分類のような短いタスクでは
+# 不要な遅延(実測で3〜4倍)を生む(7日目⓪で確認)。ルーター採用にあたり既定でFalse固定する。
+# Ollama /api/generateのトップレベル`think`フィールドの上書き値:
+# None: `think`を送らない(モデル既定値のまま)。False: thinkingモードを無効化。
+# True: thinkingモードを明示的に有効化(罠の実測比較用)。
+ROUTER_THINK: bool | None = False
 
 ROUTE_MODEL_MAP: dict[str, str] = {
     "FAST": "gpt-oss:20b",
@@ -205,6 +216,7 @@ def call_phi4(system_prompt: str, user_text: str) -> str:
         prompt=user_text,
         system=system_prompt,
         options=CLASSIFY_OPTIONS,
+        think=ROUTER_THINK,
     )
 
 
