@@ -884,10 +884,15 @@ cloudflared service install
 
 #### 残課題(次回実施)
 
-- [ ] Tailscaleアカウント作成・自宅PC/スマホへのインストール
-- [ ] `tailscale serve https / http://localhost:8080` で`localhost:8080`を公開し、スマホから`https://<端末名>.<tailnet名>.ts.net`で到達できるか確認
-- [ ] Tailscale側のACL/デバイス承認設定を確認し、想定外の端末が入り込まない構成になっているか検証
-- [ ] 本セクション(⑥)の「実施手順」「作業内容」チェックリストをTailscale版に書き換える(Cloudflare Tunnel前提のまま残っているため)
+- [x] Tailscaleアカウント作成・自宅PC/スマホへのインストール
+- [x] `tailscale serve https / http://localhost:8080` で`localhost:8080`を公開し、スマホから`https://<端末名>.<tailnet名>.ts.net`で到達できるか確認
+- [x] Tailscale側のACL/デバイス承認設定を確認し、想定外の端末が入り込まない構成になっているか検証
+- [x] 本セクション(⑥)の「実施手順」「作業内容」チェックリストをTailscale版に書き換える(Cloudflare Tunnel前提のまま残っているため)
+
+> [!info] 追記(8日目):本セクション(⑥ Cloudflare Tunnel)はTailscaleへ方針変更のうえ完了
+> 上記「残課題(次回実施)」は[[サポートAI作製計画/8日目外部アクセス(Tailscale)とSTT・TTSパイプライン.md|8日目]]①で全て実施済み。
+> 本セクション(⑥)に書かれている**実施手順・作業内容・Cloudflare Access周りの記述はすべてCloudflare Tunnel前提のまま**であり、実際に採用・実施したのは上記結論通り**Tailscale Serve**(Funnelではない)。以降このプロジェクトの外部アクセス関連の作業ログ・手順・チェックリストは**8日目①を正とする**。
+> 8日目①で確認済みの内容:MagicDNS名の割り当て、`tailscale serve --bg 8080`によるtailnet内公開(Funnel: off)、スマホのモバイル回線からの到達確認、Tailscaleアプリ切断時に到達不可であることの検証、Tailscale管理画面での機器承認(Device approval)のオン化、Open WebUI自体のログイン認証が有効であることの確認、Tailscaleサービスがスタートアップの種類「自動」でPC起動時に自動接続する設定になっていることの確認。
 
 Sources:
 - [tailscale funnel command · Tailscale Docs](https://tailscale.com/kb/1311/tailscale-funnel)
@@ -966,6 +971,6 @@ Sources:
 2. ~~Phi-4-miniの振り分けロジック(プロンプト設計・実装)~~
 3. ~~RAGの記憶DB構築(土台)~~ → [[サポートAI作製計画/5日目RAG記憶DB構築.md|5日目]]
 4. ~~C.L.A.I.R.E. (Auto) Pipeへの記憶レイヤー組み込み(検索+書き戻し)~~ → [[サポートAI作製計画/6日目RAG記憶レイヤーのPipe組み込み.md|6日目]]
-5. Obsidianノートの取り込み(ingest) ← 今回
-6. Cloudflare Tunnelのセットアップ ← 今回
-7. STT/TTSパイプラインの組み立て
+5. ~~Obsidianノートの取り込み(ingest)~~ ← 今回、完了
+6. ~~Cloudflare Tunnelのセットアップ~~ → **ドメイン代が0円制約に反するため中断。Tailscaleへ方針変更**し、[[サポートAI作製計画/8日目外部アクセス(Tailscale)とSTT・TTSパイプライン.md|8日目]]①へ持ち越し
+7. STT/TTSパイプラインの組み立て → [[サポートAI作製計画/8日目外部アクセス(Tailscale)とSTT・TTSパイプライン.md|8日目]]②
