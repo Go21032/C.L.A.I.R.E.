@@ -72,7 +72,7 @@ if str(ROUTER_SCRIPTS_DIR) not in sys.path:
 
 import code_executor  # noqa: E402
 import router  # noqa: E402
-from ollama_client import OllamaError, generate  # noqa: E402
+from ollama_client import OllamaError, generate, generate_stream  # noqa: E402
 
 # 6日目ノート(サポートAI作製計画/6日目RAG記憶レイヤーのPipe組み込み.md)④⑤:
 # 記憶レイヤー(rag_memory/scripts/memory_store.py)は、上のrouter.py等と違い
@@ -145,6 +145,15 @@ class Pipe:
         memory_top_k: int = Field(
             default=3,
             description="記憶を検索する際に取得する件数(DEEP/CODEルートのみ)。",
+        )
+        streaming_mode: str = Field(
+            default="auto",
+            description="FAST/DEEPルートの応答をトークン単位で逐次返すかどうか(9日目④)。"
+            '"auto"=呼び出し側のリクエスト(body["stream"])に従う(既定・Open WebUIの流儀) / '
+            '"always"=body["stream"]が無くても常にストリーミングする'
+            "(Open WebUIのバージョンによってはstreamフラグが渡って来ないため、その場合の逃げ道) / "
+            '"off"=8日目までと同じ全文一括応答に戻す(不具合時の切り分け用)。'
+            "CODE・CLARIFY・タスク呼び出しは設定に関わらず常に全文応答のまま。",
         )
 
     def __init__(self) -> None:
@@ -278,6 +287,12 @@ class Pipe:
     RETRIEVE_ROUTES = {"FAST", "DEEP", "CODE"}
     APPEND_ROUTES = {"FAST", "DEEP", "CODE"}
 
+    # 9日目④: トークン単位で逐次返してよいroute。
+    # CODEは`_handle_code_reply()`がACTIONブロックの解析に全文を必要とするため除外する。
+    # CLARIFYは聞き返し1文で短く、ストリーミングしても体感が変わらない割に
+    # 分岐が増えるため除外する(YAGNI。⑤の文分割は最初の1文が出れば十分速い)。
+    STREAM_ROUTES = {"FAST", "DEEP"}
+
     def _recall(self, route: str, user_text: str) -> str:
         """route別に過去の記憶を検索し、system用の文脈文字列を返す。失敗しても空文字を返す。"""
         if memory_store is None or not self.valves.memory_enabled or route not in self.RETRIEVE_ROUTES:
@@ -307,6 +322,66 @@ class Pipe:
             memory_store.append_turn(chat_id, "assistant", route, reply)
         except Exception as e:
             print(f"[claire] 記憶の書き戻しに失敗(処理は継続): {e}")
+
+    def _should_stream(self, body: dict, route: str) -> bool:
+        """このリクエストをトークン単位で逐次返してよいかを判定する(9日目④)。"""
+        if route not in self.STREAM_ROUTES:
+            return False
+        mode = self.valves.streaming_mode
+        if mode == "off":
+            return False
+        if mode == "always":
+            return True
+        # "auto"(既定): 呼び出し側の要求に従う。Open WebUIはユーザー設定に応じて
+        # body["stream"]を立てて渡してくる。voice_gateway.py(⑥)は常にTrueで呼ぶ。
+        return bool(body.get("stream"))
+
+    def _stream_reply(
+        self,
+        chat_id: str,
+        route: str,
+        user_text: str,
+        memory_context: str,
+        prefix: str,
+    ) -> Iterator[str]:
+        """FAST/DEEPの応答をトークン単位でyieldするジェネレータ(9日目④)。
+
+        設計上の要点:
+          - 例外を外へ投げない。ストリーミング中に例外を投げると、Open WebUIも
+            音声UIも「途中で止まったまま無反応」になるため、エラーは文字列として
+            yieldして呼び出し側に見せる。
+          - `_remember()`はyieldし終えた後、連結した全文で1回だけ呼ぶ。
+            **ここを落とすと音声で話した内容が記憶に残らなくなる**(④の厳守事項)。
+            呼び出し側が途中で読むのをやめた場合(音声UIの中断)にも
+            そこまでの応答を残すため、finallyに置く。
+          - デバッグ接頭辞`[route: FAST]`は記憶には含めない(6日目④⑤と同じく
+            モデルの生応答だけを書き戻す)。
+        """
+        target_model = router.ROUTE_MODEL_MAP[route]
+        if prefix:
+            yield prefix
+
+        parts: list[str] = []
+        try:
+            try:
+                router.ensure_model_ready(route)
+                stream = generate_stream(
+                    model=target_model, prompt=user_text, system=memory_context or None
+                )
+            except OllamaError as e:
+                yield f"[error] {target_model} の呼び出しに失敗しました: {e}"
+                return
+
+            try:
+                for token in stream:
+                    parts.append(token)
+                    yield token
+            except OllamaError as e:
+                yield f"\n[error] {target_model} の応答が途中で終了しました: {e}"
+        finally:
+            reply = "".join(parts)
+            if reply:
+                self._remember(chat_id, route, user_text, reply)
 
     def pipe(
         self,
@@ -374,6 +449,13 @@ class Pipe:
 
         # 6日目④⑤: route別に過去の記憶を検索し、system用の文脈として差し込む。
         memory_context = self._recall(route, user_text)
+
+        # 9日目④: FAST/DEEPかつ呼び出し側がストリーミングを望む場合は、
+        # ここでIteratorを返して以降の「全文を待つ」経路には入らない。
+        if self._should_stream(body, route):
+            return self._stream_reply(
+                chat_id, route, user_text, memory_context, f"{error_prefix}{debug_prefix}"
+            )
 
         try:
             router.ensure_model_ready(route)
