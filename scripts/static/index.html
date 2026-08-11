@@ -1,0 +1,367 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>C.L.A.I.R.E. 音声対話</title>
+<!--
+  9日目ノート(サポートAI作製計画/9日目自前音声UIとストリーミング音声対話.md)⑥の部品。
+  voice_gateway.py の /ws に接続し、常時マイクON + 無音検出(サーバ側VAD)で
+  自動的に発話を送信する。サーバから届く5種類+エラーのJSONメッセージ
+  (partial_transcript / final_transcript / token / sentence / audio / state / error)
+  を処理する。音声(audio)は届いた順に再生キューへ積み、前の再生が終わってから
+  次を再生する(同時再生で音が重なる事故を防ぐ。⑥の作業内容どおり)。
+
+  実機確認はまだ(⑥残課題)。getUserMediaはセキュアコンテキスト
+  (https または localhost)でしか動かない点に注意(⑦でスマホから使う場合は
+  Tailscale ServeのHTTPS経由にすること)。
+-->
+<style>
+  :root {
+    color-scheme: dark;
+    --bg: #10141c;
+    --panel: #1a2030;
+    --accent: #6fb3ff;
+    --accent-dim: #3a5a80;
+    --text: #e7ecf5;
+    --text-dim: #8b94a8;
+    --error: #ff6b6b;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    font-family: "Segoe UI", "Hiragino Sans", "Yu Gothic", sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    height: 100vh;
+    display: flex;
+    flex-direction: column;
+  }
+  header {
+    padding: 12px 20px;
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    border-bottom: 1px solid #232a3a;
+  }
+  header h1 { font-size: 16px; margin: 0; font-weight: 600; }
+  #state-badge {
+    padding: 4px 10px;
+    border-radius: 999px;
+    font-size: 12px;
+    background: var(--accent-dim);
+    color: var(--text);
+    transition: background 0.2s;
+  }
+  #state-badge[data-state="listening"] { background: #2a7d5b; }
+  #state-badge[data-state="thinking"]  { background: #8a6d1f; }
+  #state-badge[data-state="speaking"]  { background: var(--accent-dim); }
+  #state-badge[data-state="idle"]      { background: #2a3040; }
+  #state-badge[data-state="error"]     { background: #7d2a2a; }
+
+  main {
+    flex: 1;
+    overflow-y: auto;
+    padding: 16px 20px;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+  }
+  .turn { max-width: 760px; padding: 8px 12px; border-radius: 10px; line-height: 1.6; }
+  .turn.user { align-self: flex-end; background: var(--accent-dim); }
+  .turn.assistant { align-self: flex-start; background: var(--panel); }
+  .turn.partial { opacity: 0.6; font-style: italic; }
+  .turn.error { align-self: center; background: transparent; color: var(--error); font-size: 13px; }
+
+  footer {
+    padding: 12px 20px 20px;
+    display: flex;
+    align-items: center;
+    gap: 14px;
+    border-top: 1px solid #232a3a;
+  }
+  #mic-indicator {
+    width: 14px; height: 14px; border-radius: 50%;
+    background: #2a3040;
+    transition: background 0.15s, box-shadow 0.15s;
+  }
+  #mic-indicator.active {
+    background: #ff5a5a;
+    box-shadow: 0 0 10px 2px rgba(255, 90, 90, 0.6);
+  }
+  button {
+    background: var(--accent);
+    color: #0b1220;
+    border: none;
+    border-radius: 8px;
+    padding: 8px 16px;
+    font-weight: 600;
+    cursor: pointer;
+  }
+  button:disabled { opacity: 0.5; cursor: default; }
+  #footer-text { color: var(--text-dim); font-size: 13px; }
+</style>
+</head>
+<body>
+<header>
+  <h1>C.L.A.I.R.E. 音声対話</h1>
+  <span id="state-badge" data-state="idle">idle</span>
+</header>
+
+<main id="log"></main>
+
+<footer>
+  <button id="start-btn">マイクを開始</button>
+  <span id="mic-indicator" title="マイク入力レベル"></span>
+  <span id="footer-text">未接続</span>
+</footer>
+
+<script>
+"use strict";
+
+// --- 設定 -------------------------------------------------------------
+const WS_URL = `ws://${location.host}/ws`;
+const TARGET_SAMPLE_RATE = 16000;   // vad.py / stt_engine.py が前提とするレート(③で確定)
+const SEND_CHUNK_MS = 100;          // ③実機比較結果⑥: 100msチャンクが最有利と確定した値
+
+// --- DOM ----------------------------------------------------------------
+const logEl = document.getElementById("log");
+const stateBadge = document.getElementById("state-badge");
+const startBtn = document.getElementById("start-btn");
+const micIndicator = document.getElementById("mic-indicator");
+const footerText = document.getElementById("footer-text");
+
+// --- 状態 ------------------------------------------------------------
+let ws = null;
+let audioCtx = null;
+let micStream = null;
+let micSource = null;
+let micProcessor = null;
+let micMuted = false;           // 読み上げ中はtrueにしてサーバへ音声を送らない(エコー対策)
+let partialTurnEl = null;       // 暫定テキスト表示中の<div>(確定したら消す)
+let assistantTurnEl = null;     // 現在組み立て中の応答表示<div>
+
+// --- 音声再生キュー(⑥「前の再生が終わってから次を再生する」の実装) -----------
+const playbackQueue = [];
+let isPlaying = false;
+
+function enqueueAudio(wavBase64) {
+  playbackQueue.push(wavBase64);
+  if (!isPlaying) playNext();
+}
+
+function playNext() {
+  const next = playbackQueue.shift();
+  if (next === undefined) {
+    isPlaying = false;
+    setMicMuted(false); // 再生キューが空になったら聞き取りを再開してよい
+    return;
+  }
+  isPlaying = true;
+  setMicMuted(true); // 読み上げ中はマイクOFF(⑥仕様。エコー対策)
+
+  const audio = new Audio(`data:audio/wav;base64,${next}`);
+  audio.addEventListener("ended", playNext);
+  audio.addEventListener("error", (e) => {
+    logError(`audio再生に失敗: ${e?.message || e}`);
+    playNext();
+  });
+  audio.play().catch((e) => {
+    logError(`audio.play()に失敗(自動再生ブロックの可能性): ${e}`);
+    playNext();
+  });
+}
+
+function setMicMuted(muted) {
+  micMuted = muted;
+  micIndicator.classList.toggle("active", !muted && !!micStream);
+}
+
+// --- ログ表示 ----------------------------------------------------------
+function appendTurn(text, cls) {
+  const div = document.createElement("div");
+  div.className = `turn ${cls}`;
+  div.textContent = text;
+  logEl.appendChild(div);
+  logEl.scrollTop = logEl.scrollHeight;
+  return div;
+}
+
+function logError(message) {
+  appendTurn(`[error] ${message}`, "assistant error");
+  setState("error");
+}
+
+function setState(state) {
+  stateBadge.textContent = state;
+  stateBadge.dataset.state = state;
+}
+
+// --- WebSocketメッセージ処理 ---------------------------------------------
+// voice_gateway.py のWSメッセージ仕様(5種類+error):
+//   partial_transcript / final_transcript / token / sentence / audio / state / error
+function handleMessage(msg) {
+  switch (msg.type) {
+    case "partial_transcript":
+      if (!partialTurnEl) partialTurnEl = appendTurn("", "user partial");
+      partialTurnEl.textContent = msg.text;
+      break;
+
+    case "final_transcript":
+      if (partialTurnEl) {
+        partialTurnEl.remove();
+        partialTurnEl = null;
+      }
+      appendTurn(msg.text, "user");
+      assistantTurnEl = null; // 新しいターンなので応答表示をリセット
+      break;
+
+    case "token":
+      if (!assistantTurnEl) assistantTurnEl = appendTurn("", "assistant");
+      assistantTurnEl.textContent += msg.text;
+      break;
+
+    case "sentence":
+      // トークン単位表示が無い経路(CODE/CLARIFY等、strで返るルート)のための保険。
+      if (!assistantTurnEl) assistantTurnEl = appendTurn("", "assistant");
+      if (!assistantTurnEl.textContent.includes(msg.text)) {
+        assistantTurnEl.textContent += msg.text;
+      }
+      break;
+
+    case "audio":
+      enqueueAudio(msg.wav_b64);
+      break;
+
+    case "state":
+      setState(msg.value);
+      break;
+
+    case "error":
+      logError(`[${msg.stage}] ${msg.message}`);
+      break;
+
+    default:
+      console.warn("unknown message type:", msg);
+  }
+}
+
+// --- マイク取得・PCM16変換・WS送信 ---------------------------------------
+// getUserMediaはセキュアコンテキスト(https または localhost)でしか動かない
+// (⑥ノート注意点。スマホからは⑦のTailscale Serve HTTPS経由でアクセスすること)。
+async function startMic() {
+  if (!navigator.mediaDevices?.getUserMedia) {
+    logError("このブラウザ/接続ではマイクが使えません(https または localhost が必要)");
+    return;
+  }
+
+  micStream = await navigator.mediaDevices.getUserMedia({
+    audio: { channelCount: 1, echoCancellation: true, noiseSuppression: true },
+  });
+
+  audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+  micSource = audioCtx.createMediaStreamSource(micStream);
+
+  // ScriptProcessorNodeは非推奨だが、追加のワークレットファイル無しで
+  // 依存を増やさずに実装できるため初版はこちらを使う(YAGNI)。
+  const bufferSize = 4096;
+  micProcessor = audioCtx.createScriptProcessor(bufferSize, 1, 1);
+
+  let pcmAccumulator = new Float32Array(0);
+  const samplesPerChunk = Math.round((audioCtx.sampleRate * SEND_CHUNK_MS) / 1000);
+
+  micProcessor.onaudioprocess = (event) => {
+    if (micMuted || !ws || ws.readyState !== WebSocket.OPEN) return;
+
+    const input = event.inputBuffer.getChannelData(0);
+    const merged = new Float32Array(pcmAccumulator.length + input.length);
+    merged.set(pcmAccumulator);
+    merged.set(input, pcmAccumulator.length);
+    pcmAccumulator = merged;
+
+    while (pcmAccumulator.length >= samplesPerChunk) {
+      const chunk = pcmAccumulator.slice(0, samplesPerChunk);
+      pcmAccumulator = pcmAccumulator.slice(samplesPerChunk);
+      const pcm16 = downsampleAndEncode(chunk, audioCtx.sampleRate, TARGET_SAMPLE_RATE);
+      ws.send(pcm16.buffer);
+    }
+
+    // マイクレベル表示(ざっくりRMS)
+    let sumSq = 0;
+    for (let i = 0; i < input.length; i++) sumSq += input[i] * input[i];
+    const rms = Math.sqrt(sumSq / input.length);
+    micIndicator.classList.toggle("active", rms > 0.01);
+  };
+
+  micSource.connect(micProcessor);
+  micProcessor.connect(audioCtx.destination);
+
+  setMicMuted(false);
+  footerText.textContent = "聞き取り中...";
+}
+
+// 線形補間による簡易リサンプル(48kHz等 → 16kHz) + Float32 → Int16 PCM変換。
+// 音質より実装のシンプルさを優先(初版。耳障りならFIRフィルタ等へ差し替える)。
+function downsampleAndEncode(float32, fromRate, toRate) {
+  if (fromRate === toRate) {
+    return floatToInt16(float32);
+  }
+  const ratio = fromRate / toRate;
+  const newLength = Math.round(float32.length / ratio);
+  const result = new Float32Array(newLength);
+  for (let i = 0; i < newLength; i++) {
+    const srcIndex = i * ratio;
+    const i0 = Math.floor(srcIndex);
+    const i1 = Math.min(i0 + 1, float32.length - 1);
+    const frac = srcIndex - i0;
+    result[i] = float32[i0] * (1 - frac) + float32[i1] * frac;
+  }
+  return floatToInt16(result);
+}
+
+function floatToInt16(float32) {
+  const int16 = new Int16Array(float32.length);
+  for (let i = 0; i < float32.length; i++) {
+    const s = Math.max(-1, Math.min(1, float32[i]));
+    int16[i] = s < 0 ? s * 0x8000 : s * 0x7fff;
+  }
+  return int16;
+}
+
+// --- WebSocket接続 -------------------------------------------------------
+function connect() {
+  ws = new WebSocket(WS_URL);
+  ws.binaryType = "arraybuffer";
+
+  ws.onopen = () => {
+    footerText.textContent = "接続しました";
+    setState("listening");
+  };
+  ws.onmessage = (event) => {
+    try {
+      handleMessage(JSON.parse(event.data));
+    } catch (e) {
+      console.error("WSメッセージの解析に失敗:", e, event.data);
+    }
+  };
+  ws.onerror = () => logError("WebSocket接続でエラーが発生しました");
+  ws.onclose = () => {
+    footerText.textContent = "切断されました(再接続していません)";
+    setState("idle");
+  };
+}
+
+// --- 起動 -----------------------------------------------------------------
+startBtn.addEventListener("click", async () => {
+  startBtn.disabled = true;
+  try {
+    connect();
+    await startMic();
+  } catch (e) {
+    logError(`マイクの初期化に失敗: ${e}`);
+    startBtn.disabled = false;
+  }
+});
+</script>
+</body>
+</html>

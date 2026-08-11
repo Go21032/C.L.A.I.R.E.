@@ -66,3 +66,44 @@ class FailingMemoryStore(NoopMemoryStore):
 
     def append_turn(self, chat_id, role, route, text, topic=""):
         raise RuntimeError("simulated memory DB write failure")
+
+
+class ScriptedVoskRecognizer:
+    """9日目⑥ stt_engine.STTEngine のテスト用フェイク。
+
+    実際のVosk(`vosk.KaldiRecognizer`)をインストール・モデルロードせずに、
+    `feed_audio()`を呼ぶたびに「あらかじめ台本(script)で決めた戻り値」を
+    順番に返すだけの最小実装。台本の1要素は
+    (accepted: bool, partial_text: str, final_text: str) のタプルで、
+    STTEngine.feed_audio()が呼ぶ AcceptWaveform/PartialResult/Result と
+    同じ形になるよう、内部でVosk互換のJSON文字列に変換して返す。
+    """
+
+    def __init__(self, script):
+        import json
+
+        self._json = json
+        self._script = list(script)
+        self._step = 0
+        self._last_partial_json = "{}"
+        self._last_result_json = "{}"
+        self.accept_waveform_calls: list[bytes] = []
+
+    def AcceptWaveform(self, data: bytes) -> bool:
+        self.accept_waveform_calls.append(data)
+        accepted, partial_text, final_text = self._script[self._step]
+        self._step += 1
+        if accepted:
+            self._last_result_json = self._json.dumps({"text": final_text})
+        else:
+            self._last_partial_json = self._json.dumps({"partial": partial_text})
+        return accepted
+
+    def PartialResult(self) -> str:
+        return self._last_partial_json
+
+    def Result(self) -> str:
+        return self._last_result_json
+
+    def FinalResult(self) -> str:
+        return self._last_result_json

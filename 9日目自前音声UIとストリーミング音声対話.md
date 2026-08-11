@@ -2,7 +2,7 @@
 project: C.L.A.I.R.E.(さぽーとAI)
 date: 2026-08-09
 tags: [STT, TTS, Whisper, faster-whisper, Vosk, VOICEVOX, ストリーミング, 音声対話, VAD, WebSocket, FastAPI, 自前UI, 遅延計測, 作業ログ]
-status: 準備中(①②は実機実測まで完了。③は実機でのエンジン×モデル比較・固有名詞認識・`initial_prompt`効果・方式A悪化点の精緻化・方式B(Vosk)実測まで完了。**STT暫定結論=確定はfaster-whisper small+initial_prompt、暫定表示はVosk small-ja(100msチャンク)の方式B**。④⑤は実装+ユニットテスト146件パスまで完了、実機での確認はこれから)
+status: 準備中(①②は実機実測まで完了。③は実機でのエンジン×モデル比較・固有名詞認識・`initial_prompt`効果・方式A悪化点の精緻化・方式B(Vosk)実測まで完了。**STT暫定結論=確定はfaster-whisper small+initial_prompt、暫定表示はVosk small-ja(100msチャンク)の方式B**。④⑤⑥(案A′実証・vad.py・stt_engine.py・voice_gateway.py・static/index.html)は実装+ユニットテスト169件パスまで完了。VoskのAcceptWaveform()をVADに流用する方式を実機検証で採用(留保あり)。⑥のブラウザ実機確認(実マイク・実Pipe・実VOICEVOX)はこれから)
 ---
 
 [[サポートAI作製計画/8日目外部アクセス(Tailscale)とSTT・TTSパイプライン.md|8日目]]で①外部アクセス(Tailscale Serve)は完了し、②のタスク1で**採用する声(VOICEVOX / 東北ずん子 / 話者ID `107`)まで確定**したが、shim経由でOpen WebUIに読み上げさせたところ**回答テキストが出てから音声が鳴り始めるまで約1分かかる**問題が実測で判明した。原因は「全文生成完了 → 全文を一括TTS合成」という直列構造で、**Open WebUI標準UIのままでは原理的に解決できない**。今回はこの根本解決(文単位パイプライン化)を中心に、8日目で未着手だったタスク2(STT選定)・タスク3(LLMストリーミング化)を消化し、**自前音声UIを完成させる**。
@@ -518,8 +518,8 @@ C.L.A.I.R.E.、LanceDB、Ruri、Tailscale、Obsidian、VOICEVOX、東北ずん�
 - ~~**方式B(Vosk等の軽量エンジンによる暫定表示 + Whisperによる確定)の検証(未着手)**~~ → **完了(実機比較結果⑥)。方式Bは成立**。残るのは⑥での実際の組み込み(音声取り込みと認識の別スレッド化、起動時ウォームアップ、暫定→確定の差分表示)
 - ~~方式Aの悪化開始点(何秒あたりから閾値を超えるか)の精緻化~~ → **完了(実機比較結果⑤)。境界は15〜20秒、悪化は概ね線形**
 - 逐次表示(方式A/Bどちらを採用するにせよ)が体感を損なわない更新間隔かの最終判断(`stt_bench.py`の暫定閾値1.0秒、`vosk_stream_bench.py`の「p95<チャンク長×0.5」とも仮の値。UI側の更新間隔設計と合わせて確定する)
-- VADの方式(silero-vad / webrtcvad)と無音閾値の選定(未着手)。**ただしVoskの発話区切りを流用できるなら不要になる可能性があるため、⑥でまずそれを確認する**
-- Voskモデルの配置場所の確定(**非ASCIIパスではロードに失敗する**ため、現在はvault外の`C:\Users\gakuh\vosk_models\vosk-model-small-ja-0.22`に置いている。vault内の`scripts/models/`には同じzipを残してあるが、そこからは直接ロードできない)
+- ~~VADの方式(silero-vad / webrtcvad)と無音閾値の選定~~ → **完了(⑥`vad.py`実機比較結果)。Voskの`AcceptWaveform()`を流用する方式(`VoskEndpointVAD`)を採用し、silero-vad/webrtcvadは不要と判断。ただし「無音の少ない長い連続発話では区切りが遅れる/来ない」という留保あり(⑥残課題)**
+- Voskモデルの配置場所の確定(**非ASCIIパスではロードに失敗する**ため、現在はvault外の`C:\Users\gakuh\vosk_models\vosk-model-small-ja-0.22`に置いている。vault内のvo`scripts/models/`には同じzipを残してあるが、そこからは直接ロードできない)
 - 常駐時のVRAM/CPU使用量の計測(未着手。ルーターがCPU固定な点に注意)
 - 採用するSTT構成(エンジン・モデル・デバイス・逐次化方式・VAD方式と閾値)の最終確定(上記が揃ってから)
 - **東北ずん子合成音声でのベンチに加え、⑥で自前音声UIが動いた段階で実際の肉声でも認識精度を確認する**(合成音声は正解ラベルが明確な反面、人間の肉声とは音響特性が異なるため)
@@ -832,17 +832,29 @@ LLM出力を模した文字列(デバッグ接頭辞・強調・箇条書き・�
 
 ### 作業内容
 
-- [ ] `voice_gateway.py`(新規)を書く:FastAPI + WebSocketエンドポイント。**待受は`127.0.0.1`固定**にする(tailnet外に晒さないため。外部公開はTailscale Serveに任せる)
-- [ ] **案A′の実証を最初に行う**:`support_ai_auto_pipe.Pipe`をimportして`pipe()`を素のPythonから呼べることを、UIを書く前に確認する(8日目の発見1は「依存関係上は可能」までで**実際には未検証**)
-- [ ] `vad.py`(新規)を書く:③で確定した方式・閾値で「発話開始」「無音による発話終了」を検出する
-- [ ] `stt_engine.py`(新規)を書く:②③で確定した構成をラップし、**暫定テキスト(逐次)と確定テキスト**の2種類をコールバック/イベントで返す
-- [ ] `static/index.html`(新規)を書く:マイク取得、音声のWS送信、**暫定テキストの逐次表示**、応答テキストの逐次表示、**音声の順次再生キュー**、状態表示(待機/聞き取り中/考え中/読み上げ中)
-- [ ] **音声再生キュー**を実装する:届いたwavを順番に再生し、**前の再生が終わってから次を再生する**(同時再生で音が重なる事故を防ぐ)
-- [ ] **読み上げ中のマイクOFF**を実装する(エコー対策)
-- [ ] WebSocketのメッセージ仕様を決めてノートに記録する(暫定テキスト / 確定テキスト / 応答トークン / 音声チャンク / 状態変更 の5種類程度)
-- [ ] エラー時の挙動を決める(STT失敗・LLM失敗・TTS失敗のそれぞれで**UIが無反応にならない**ようにする)
-- [ ] 自宅PCのブラウザ(localhost)で一連の会話が成立することを確認する
-- [ ] **「回答テキストの表示開始」と「音声の再生開始」がほぼ同時になることを確認する**(=8日目の1分問題が解消したことの実証)
+- [x] `voice_gateway.py`(新規)を書く:FastAPI + WebSocketエンドポイント。**待受は`127.0.0.1`固定**にする(tailnet外に晒さないため。外部公開はTailscale Serveに任せる)← 実装済み。`create_app()`+`run_turn()`。フェイクPipe/STT/TTSでの通し動作はTestClientで確認済み(結果欄)。**実物のPipe/Vosk/faster-whisper/VOICEVOXを組み合わせた実機起動はまだ**
+- [x] **案A′の実証を最初に行う**:`support_ai_auto_pipe.Pipe`をimportして`pipe()`を素のPythonから呼べることを、UIを書く前に確認する(8日目の発見1は「依存関係上は可能」までで**実際には未検証**)← 実施手順のコマンドを実行し、素のPythonからのimport・`pipe()`直呼びが成立することを確認済み(案A′で進めてよいと判断)
+- [x] `vad.py`(新規)を書く:③で確定した方式・閾値で「発話開始」「無音による発話終了」を検出する← `VoskEndpointVAD`として実装。③残課題「VoskのResult()タイミングを発話区切りに流用できるか」を実機で検証済み(結果欄。重要な留保あり)
+- [x] `stt_engine.py`(新規)を書く:②③で確定した構成をラップし、**暫定テキスト(逐次)と確定テキスト**の2種類をコールバック/イベントで返す← `STTEngine`として実装。「東北ずん子」辞書補正(`correct_zunko`)も実装済み
+- [x] `static/index.html`(新規)を書く:マイク取得、音声のWS送信、**暫定テキストの逐次表示**、応答テキストの逐次表示、**音声の順次再生キュー**、状態表示(待機/聞き取り中/考え中/読み上げ中)← 実装済み。**ブラウザでの実機確認はまだ**(残課題)
+- [x] **音声再生キュー**を実装する:届いたwavを順番に再生し、**前の再生が終わってから次を再生する**(同時再生で音が重なる事故を防ぐ)← `index.html`の`playbackQueue`/`playNext()`。ブラウザ実機確認は残課題
+- [x] **読み上げ中のマイクOFF**を実装する(エコー対策)← `setMicMuted()`。再生キューが空になったら自動的にマイクを再開する
+- [x] WebSocketのメッセージ仕様を決めてノートに記録する(暫定テキスト / 確定テキスト / 応答トークン / 音声チャンク / 状態変更 の5種類程度)← 下記「WSメッセージ仕様」参照
+- [x] エラー時の挙動を決める(STT失敗・LLM失敗・TTS失敗のそれぞれで**UIが無反応にならない**ようにする)← `run_turn()`がPipe呼び出し失敗・TTS合成失敗(1文単位)を`{"type":"error",...}`として返し、例外を外へ投げない設計にした。ユニットテストで担保済み
+- [ ] 自宅PCのブラウザ(localhost)で一連の会話が成立することを確認する(**実機確認が残課題**)
+- [ ] **「回答テキストの表示開始」と「音声の再生開始」がほぼ同時になることを確認する**(=8日目の1分問題が解消したことの実証。**実機確認が残課題**)
+
+### WSメッセージ仕様(確定)
+
+```
+{"type": "partial_transcript", "text": str}                  # STT暫定(Vosk)
+{"type": "final_transcript", "text": str}                    # STT確定(faster-whisper、辞書補正済み)
+{"type": "token", "text": str}                                # LLM生成トークン(逐次)
+{"type": "sentence", "text": str}                             # 確定した1文(正規化・Markdown除去済み)
+{"type": "audio", "text": str, "wav_b64": str}                # 1文ぶんのTTS wav(base64エンコード)
+{"type": "state", "value": "listening"|"thinking"|"speaking"|"idle"}
+{"type": "error", "stage": "pipe"|"tts"|..., "message": str}  # 5種+エラー通知(UIを無反応にしないための仕組み)
+```
 
 ### 実施手順(予定)
 
@@ -875,11 +887,43 @@ python voice_gateway.py --host 127.0.0.1 --port 5055
 
 ### 結果 / 分析 / 改善策
 
-(実行後に記入)
+#### 実装した部品
+
+- [[サポートAI作製計画/scripts/vad.py]](**新規**):`VoskEndpointVAD`。silero-vad/webrtcvadを使わず、Voskの`AcceptWaveform()`の戻り値(内部エンドポインタが区切りを検出したタイミング)だけを見て発話開始/終了イベントに変換する薄い層。音声そのものは一切扱わないため、Voskをインストールしなくても純粋なロジックとして単体テストできる(`tests/test_vad.py`、9件)。
+- [[サポートAI作製計画/scripts/stt_engine.py]](**新規**):`STTEngine`。Vosk(暫定)+faster-whisper(確定)+`vad.VoskEndpointVAD`(発話区切り)+`correct_zunko`(辞書補正)を1つにまとめた部品。テストではVosk/faster-whisperをフェイクに差し替えてロジックのみ検証(`tests/test_stt_engine.py`、9件)。実運用向けに実物のVosk/faster-whisperを組み立てる`create_default_engine()`も用意した(自動テスト対象外)。
+- [[サポートAI作製計画/scripts/voice_gateway.py]](**新規**):`run_turn()`(WebSocket/FastAPIに依存しない、Pipe呼び出し→トークン→文分割→TTSのオーケストレーションを行う純粋なジェネレータ。`tests/test_voice_gateway.py`、5件)と、それをWebSocketに配線する`create_app()`。
+- [[サポートAI作製計画/scripts/static/index.html]](**新規**):ブラウザUI(マイク取得・PCM16変換・WS送信・5種のメッセージ処理・音声再生キュー・状態表示)。
+
+全169件(既存146件+today実装23件)のユニットテストがパス。既存テストは1件も変更していない(後方互換の実証)。
+
+#### ③残課題の検証結果:VoskのAcceptWaveform()を発話区切り(VAD)に流用できるか
+
+**結論:単発の短い発話(1ターン)では非常によく機能するが、無音の少ない長い連続発話では信頼できない。**両方を実機の`sample_long.wav`/`sample01〜04.wav`(東北ずん子合成音声)で検証した。
+
+1. **単発発話+末尾無音のシナリオ(実際の対話に近い)**:`sample01〜04.wav`(4.1〜7.7秒の発話)の末尾に1.5秒の無音を追加して流したところ、**発話終了から0.65〜0.89秒後にAcceptWaveform()がTrueになった**(sample01: 0.89秒後、sample02: 0.70秒後、sample03: 0.79秒後、sample04: 0.65秒後)。これは「ユーザーが話し終えて黙る」という実際の音声対話のパターンに近く、**VADとして十分実用的な遅延**(1秒未満)。
+2. **35秒の連続発話(句読点はあるが無音が短いモノローグ)のシナリオ**:`sample_long.wav`を100msチャンクで流したところ、**AcceptWaveform()がTrueになったのはたった1回(20.4秒地点)**で、しかもテキストの区切りは文の途中(「テイルズ系(=Tailscaleの誤認識)」の途中)だった。残りの14.6秒ぶんは`FinalResult()`(ストリーム終了時の強制確定)でしか取れなかった。**句点・読点程度の短い間では、Kaldiの内部エンドポインタは区切ってくれない**ことが分かった。
+3. **設計への反映**:これは想定していた利用シーン(ユーザーが1つの発話をして黙る→AIが応答する、のターン制対話)には合致する結果であり、⑥の`stt_engine.STTEngine`はそのまま使ってよいと判断した。ただし**ユーザーが長い指示を無音を挟まず一気に話す場合**(例:考えながら長々と話す等)は、区切りが極端に遅れる/来ないリスクがあるため、`STTEngine.flush()`(バッファ強制吐き出し)を用意してある。**現状これはWebSocket切断時にしか呼んでいない**ため、「一定時間(例:20秒)経過してもAcceptWaveform()がTrueにならなければ強制的に確定へ回す」タイムアウト処理を⑥の実機確認時に追加するかどうかの判断が必要(残課題)。
+4. これにより**silero-vad/webrtcvadの追加導入は不要と判断してよい**(③の期待どおり)。ただし上記2の弱点(長い無音なしモノローグ)は、専用VADライブラリなら音量の変化やポーズの微妙な長さで区切れる可能性があり、⑥実機確認で「発話が長いとなかなか確定しない」体感が出た場合の代替案として記録しておく。
+
+#### 実装時に踏んだ実バグ:FastAPIのWebSocketルートが無言で閉じる
+
+`voice_gateway.py`のFastAPI統合をTestClientで検証する過程で、`/ws`に接続すると**エラーメッセージも出さずに即座に閉じる**現象に遭遇した。原因の切り分けに時間を要したため記録する:
+
+- 原因:`voice_gateway.py`は`from __future__ import annotations`を使っており、関数の型ヒント(`websocket: WebSocket`)は文字列として遅延評価される。FastAPIはWebSocketルートの型ヒントを`typing.get_type_hints()`で実行時に解決するが、これは**関数の`__globals__`(モジュールのグローバル名前空間)しか見ない**。当初`from fastapi import FastAPI, WebSocket, WebSocketDisconnect`を`create_app()`関数の内側でローカルimportしていたため、`WebSocket`という名前は`create_app`のローカルスコープにしか存在せず、モジュールのグローバル名前空間には無かった。その結果`get_type_hints()`が`NameError`を送出し、それが**WebSocket接続がacceptされる前だったためStarletteの例外ミドルウェアがトレースバックを表示せず無言でクローズする**、という発見しづらい失敗モードになっていた。
+- 検証方法:`route.endpoint`(生の関数)を直接呼ぶと正常動作するのに、ASGIアプリ本体(`app(scope, receive, send)`)を直接叩くと`websocket.close`だけが送られて終わる、という差分から「FastAPIのルート構築(依存解決)層で失敗している」と切り分けた。
+- 対処:`fastapi`関連のimport(`FastAPI`/`WebSocket`/`WebSocketDisconnect`/`FileResponse`/`StaticFiles`)を**モジュールのトップレベル**に移した(未インストール環境でも`run_turn()`単体は使えるよう`try/except ImportError`で保護)。修正後、`fastapi.testclient.TestClient`でフェイクPipe/STT/TTSを使った`/ws`の通し動作(接続→音声送信→partial_transcript→final_transcript→state→token→sentence→audio→state:idle)を確認できた。
+- 教訓:`from __future__ import annotations`を使うファイルでFastAPI(や他の実行時型ヒント解決に依存するライブラリ)のデコレータ付き関数を書く場合、**その関数が参照する型は必ずモジュールのトップレベルでimportする**こと。
 
 ### 残課題
 
-(実行後に記入)
+- 自宅PCのブラウザ(localhost)で実際にマイクを使った通しの会話が成立するかの実機確認(**⑥の最終ゴール。未実施**)
+- 「回答テキストの表示開始」と「音声の再生開始」がほぼ同時になることの実機確認(=8日目の1分問題解消の実証。**未実施**)
+- 実物のVosk/faster-whisper/VOICEVOX/`support_ai_auto_pipe.Pipe`を組み合わせた`voice_gateway.py`の起動確認(現状はTestClient+フェイクでの配線確認のみ)
+- `STTEngine`に「一定時間(タイムアウト)で強制確定」を追加するかどうかの判断(③残課題の検証結果3を参照。長い無音なしモノローグへの対策)
+- `static/index.html`のマイク音声のダウンサンプリング(線形補間)が音質・認識精度に悪影響を与えていないかの実機確認(現状はブラウザの`AudioContext.sampleRate`(通常44.1/48kHz)→16kHzへの簡易リサンプル)
+- `ScriptProcessorNode`は非推奨API。実機で問題が出たら`AudioWorkletNode`へ移行する(初版はワークレットファイルを増やさずに済むためYAGNIとして見送った)
+- ブラウザの自動再生ポリシー(ユーザー操作なしの`audio.play()`がブロックされる場合がある)への対応。「マイクを開始」ボタン押下がユーザー操作にあたるため通常は問題ないはずだが実機確認が必要
+- スマホのブラウザでの動作確認(⑦の作業。マイク周りの挙動がPCと異なる可能性)
 
 ---
 

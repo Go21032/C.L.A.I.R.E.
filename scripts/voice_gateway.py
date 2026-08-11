@@ -1,0 +1,292 @@
+r"""
+voice_gateway.py
+------------------
+9日目ノート(サポートAI作製計画/9日目自前音声UIとストリーミング音声対話.md)
+⑥「自前音声UI(案A′)」の本体。FastAPI + WebSocketで、ブラウザのマイク音声を
+受け取り、STT(②③) → LLM(④のストリーミング) → 文分割(⑤) → TTS(8日目)を
+1本のパイプラインでつなぎ、文が確定するそばから音声チャンクをブラウザへ返す。
+
+8日目で決めた**案A′**(このゲートウェイが`support_ai_auto_pipe.Pipe`を直import
+して`pipe()`を呼ぶ。Open WebUIのHTTPを経由しない)で実装する。⑥の作業内容
+「案A′の実証」は`python -c "...from support_ai_auto_pipe import Pipe; ..."`で
+別途確認済み(このファイルはその確認後に書く、という本ノートの依存順どおり)。
+
+構成(このファイルが担う役割):
+    [ブラウザ] --WebSocket(バイナリ=PCM音声 / テキスト=JSON制御)--> [voice_gateway.py]
+       stt_engine.STTEngine.feed_audio() で暫定/確定テキストを得る
+         → 確定したら run_turn() で Pipe.pipe() を直呼びし、
+           トークン列を sentence_splitter で文に切り、1文ずつ tts_adapter.synthesize()
+       すべてWSメッセージとしてブラウザへ順次push(音声はbase64)
+
+WSメッセージ仕様(JSON。5種類+エラー。⑥の作業内容どおりノートにも転記すること):
+    {"type": "partial_transcript", "text": str}                  # STT暫定(Vosk)
+    {"type": "final_transcript", "text": str}                    # STT確定(faster-whisper)
+    {"type": "token", "text": str}                                # LLM生成トークン(逐次)
+    {"type": "sentence", "text": str}                             # 確定した1文
+    {"type": "audio", "text": str, "wav_b64": str}                # 1文ぶんのTTS wav(base64)
+    {"type": "state", "value": "listening"|"thinking"|"speaking"|"idle"}
+    {"type": "error", "stage": str, "message": str}
+
+`run_turn()`はWebSocket/FastAPIに一切依存しない純粋なジェネレータにしてあり、
+`tests/test_voice_gateway.py`でPipe/TTSをフェイクに差し替えてロジック
+(トークン→文→音声の順序、エラー時にUIが無反応にならないこと)を検証している。
+WebSocketハンドラ自体・ブラウザからの実際のマイク入力・実際のPipe/Vosk/faster-whisper/
+VOICEVOXを組み合わせた通しの動作は自動テストの対象外(⑥残課題。実機確認が必要)。
+"""
+
+from __future__ import annotations
+
+import argparse
+import base64
+import sys
+from pathlib import Path
+from typing import Callable, Iterator
+
+SCRIPT_DIR = Path(__file__).resolve().parent
+if str(SCRIPT_DIR) not in sys.path:
+    sys.path.insert(0, str(SCRIPT_DIR))
+OPENWEBUI_PIPE_DIR = SCRIPT_DIR / "openwebui_pipe"
+if str(OPENWEBUI_PIPE_DIR) not in sys.path:
+    sys.path.insert(0, str(OPENWEBUI_PIPE_DIR))
+
+from sentence_splitter import SentenceSplitter  # noqa: E402
+
+# fastapi/uvicornはcreate_app()/main()でのみ必要(run_turn()単体のユニットテストは
+# これらを一切importしない)。ただしFastAPIのWebSocketルートは`from __future__ import
+# annotations`環境下で`get_type_hints()`により型ヒントを実行時解決するため、
+# `WebSocket`等をcreate_app()内でローカルimportすると「モジュールのグローバル名前空間に
+# 存在しない」としてNameErrorになり、accept()の前に例外がexception middlewareへ
+# 飲み込まれて**無言でWebSocketが閉じる**という実バグを踏んだ(実機確認の過程で発見)。
+# そのため、これらは他のスクリプトのimport順の慣習(標準ライブラリ/検証対象を先頭でimport)
+# 通りモジュールトップレベルでimportする。fastapi未インストール環境でも
+# `run_turn()`は単体で使いたいことがあるため、失敗時はNoneのままにしてcreate_app()側で
+# 分かりやすいエラーを出す。
+try:
+    from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+    from fastapi.responses import FileResponse
+    from fastapi.staticfiles import StaticFiles
+except ImportError:  # pragma: no cover - fastapi未インストール環境でのrun_turn単体利用向け
+    FastAPI = WebSocket = WebSocketDisconnect = FileResponse = StaticFiles = None  # type: ignore
+
+DEFAULT_HOST = "127.0.0.1"  # tailnet外に晒さないため待受はlocalhost固定(外部公開はTailscale Serveに任せる)
+DEFAULT_PORT = 5055
+TARGET_SAMPLE_RATE = 16000
+
+
+# ---------------------------------------------------------------------------
+# run_turn(): WebSocket/FastAPIに依存しない、1ターン分のオーケストレーション
+# ---------------------------------------------------------------------------
+
+
+def _wav_message(text: str, wav_bytes: bytes) -> dict:
+    return {"type": "audio", "text": text, "wav_b64": base64.b64encode(wav_bytes).decode("ascii")}
+
+
+def _sentences_from_reply(reply, splitter: SentenceSplitter) -> Iterator[dict]:
+    """`pipe.pipe()`の戻り値(str または トークンのIterator[str])を、
+    `{"type": "token", ...}` / `{"type": "sentence", ...}` のdict列に変換する。
+
+    9日目④の設計どおり、FAST/DEEPかつストリーミング要求時のみIterator[str]が返り、
+    CODE/CLARIFY/タスク呼び出しはstrのまま返る。どちらの経路でも最終的に
+    sentence_splitterへ通してから返す(strの場合もMarkdown除去等の正規化を効かせるため)。
+    """
+    if isinstance(reply, str):
+        for sentence in splitter.feed(reply):
+            yield {"type": "sentence", "text": sentence}
+        for sentence in splitter.flush():
+            yield {"type": "sentence", "text": sentence}
+        return
+
+    for token in reply:
+        yield {"type": "token", "text": token}
+        for sentence in splitter.feed(token):
+            yield {"type": "sentence", "text": sentence}
+    for sentence in splitter.flush():
+        yield {"type": "sentence", "text": sentence}
+
+
+def run_turn(
+    pipe,
+    chat_id: str,
+    user_text: str,
+    *,
+    synthesize: Callable[[str], bytes],
+    splitter_kwargs: dict | None = None,
+) -> Iterator[dict]:
+    """1ターン分の会話を実行し、WSへそのまま送れるdictメッセージを順次yieldする。
+
+    `pipe`は`support_ai_auto_pipe.Pipe`互換オブジェクト(`.pipe(body, __metadata__=...)`を
+    持つもの)。`body["stream"]=True`を渡す(FAST/DEEPならIterator[str]、それ以外はstrが返る。
+    分岐の判断はPipe側の責務でここは戻り値の型を見るだけでよい)。
+
+    例外は外へ投げない(9日目④の`_stream_reply()`と同じ方針。⑥の作業内容
+    「エラー時にUIが無反応にならないようにする」の実装)。Pipe呼び出し自体が失敗した場合、
+    TTS合成が1文だけ失敗した場合のいずれも`{"type": "error", ...}`を返しつつ、
+    残りの処理(他の文の合成・最後のstate: idle送出)は続行する。
+    """
+    yield {"type": "state", "value": "thinking"}
+
+    splitter = SentenceSplitter(**(splitter_kwargs or {}))
+
+    try:
+        reply = pipe.pipe(
+            body={"messages": [{"role": "user", "content": user_text}], "stream": True},
+            __metadata__={"chat_id": chat_id},
+        )
+    except Exception as e:  # noqa: BLE001 - Pipe呼び出し失敗の理由をそのまま通知する
+        yield {"type": "error", "stage": "pipe", "message": f"{type(e).__name__}: {e}"}
+        yield {"type": "state", "value": "idle"}
+        return
+
+    for event in _sentences_from_reply(reply, splitter):
+        yield event
+        if event["type"] != "sentence":
+            continue
+        sentence = event["text"]
+        try:
+            wav_bytes = synthesize(sentence)
+        except Exception as e:  # noqa: BLE001 - 1文の合成失敗で残りの文の再生を止めない
+            yield {"type": "error", "stage": "tts", "message": f"{type(e).__name__}: {e}"}
+            continue
+        yield _wav_message(sentence, wav_bytes)
+
+    yield {"type": "state", "value": "idle"}
+
+
+# ---------------------------------------------------------------------------
+# FastAPI + WebSocket: ブラウザとの実配線(⑥残課題:実機確認はまだ)
+# ---------------------------------------------------------------------------
+
+
+def create_app(
+    *,
+    pipe_factory: Callable[[], object] | None = None,
+    stt_engine_factory: Callable[[Callable[[str], None], Callable[[str], None]], object] | None = None,
+    synthesize: Callable[[str], bytes] | None = None,
+):
+    """FastAPIアプリを組み立てる。
+
+    実運用では引数なしで呼び、実物のPipe/STTEngine/tts_adapterを使う。
+    引数はテスト・段階的な差し替えのために用意してある(現時点の自動テストは
+    `run_turn()`単体で完結しており、このFastAPIアプリ自体の統合テストは未整備。
+    9日目⑥残課題として実機確認と合わせて追加する)。
+    """
+    if FastAPI is None:
+        raise RuntimeError("fastapiが未インストールです(pip install fastapi uvicorn[standard])")
+
+    app = FastAPI()
+    static_dir = SCRIPT_DIR / "static"
+    if static_dir.exists():
+        app.mount("/static", StaticFiles(directory=str(static_dir)), name="static")
+
+    def _default_pipe_factory():
+        from support_ai_auto_pipe import Pipe  # noqa: PLC0415
+
+        return Pipe()
+
+    def _default_synthesize():
+        import tts_adapter  # noqa: PLC0415
+
+        # ①で確定した声(VOICEVOX/東北ずん子/話者ID 107)。エンジンURL/話者IDは
+        # 環境変数で上書きできるようにしておく(⑦でTailscale経由になっても差し替え不要)。
+        import os  # noqa: PLC0415
+
+        engine_url = os.environ.get("TTS_ENGINE_URL", "http://127.0.0.1:50021")
+        speaker_id = int(os.environ.get("TTS_SPEAKER_ID", "107"))
+
+        def synth(text: str) -> bytes:
+            return tts_adapter.synthesize(engine_url, text, speaker_id)
+
+        return synth
+
+    def _default_stt_engine_factory(on_partial, on_final):
+        import os  # noqa: PLC0415
+
+        from stt_engine import create_default_engine  # noqa: PLC0415
+
+        vosk_model_dir = os.environ.get(
+            "VOSK_MODEL_DIR", str(Path.home() / "vosk_models" / "vosk-model-small-ja-0.22")
+        )
+        return create_default_engine(
+            vosk_model_dir=vosk_model_dir, on_partial=on_partial, on_final=on_final
+        )
+
+    pipe_factory = pipe_factory or _default_pipe_factory
+    synthesize = synthesize or _default_synthesize()
+    stt_engine_factory = stt_engine_factory or _default_stt_engine_factory
+
+    @app.get("/")
+    def index():
+        return FileResponse(str(static_dir / "index.html"))
+
+    @app.websocket("/ws")
+    async def ws_endpoint(websocket: WebSocket):
+        await websocket.accept()
+        pipe = pipe_factory()
+        chat_id = f"voice-{id(websocket)}"
+
+        # マイクは常時ON+VAD自動送信、読み上げ中はマイクOFF(⑥仕様)。
+        # 「読み上げ中はSTTへ音声を渡さない」制御はブラウザ側(mic mute)が主で、
+        # ここではエコー対策の保険として speaking 中は確定転写のみ受け付ける実装にしてもよいが、
+        # 初版はブラウザ側制御を信頼しシンプルに保つ(YAGNI)。
+
+        async def send_json(msg: dict) -> None:
+            await websocket.send_json(msg)
+
+        def on_partial(text: str) -> None:
+            _schedule(send_json({"type": "partial_transcript", "text": text}))
+
+        def on_final(text: str) -> None:
+            _schedule(_handle_final_transcript(text))
+
+        pending_sends: list = []
+
+        def _schedule(coro) -> None:
+            # STTEngineのコールバックは同期関数として呼ばれるため、ここでは
+            # コルーチンをためておき、feed_audio()の呼び出し元(下のメインループ)側で
+            # awaitする。WebSocket送信は必ずイベントループ上で行う必要があるための橋渡し。
+            pending_sends.append(coro)
+
+        async def _handle_final_transcript(text: str) -> None:
+            await send_json({"type": "final_transcript", "text": text})
+            await send_json({"type": "state", "value": "speaking"})
+            for event in run_turn(pipe, chat_id, text, synthesize=synthesize):
+                await send_json(event)
+
+        stt = stt_engine_factory(on_partial, on_final)
+
+        try:
+            while True:
+                message = await websocket.receive()
+                if message.get("type") == "websocket.disconnect":
+                    break
+                data = message.get("bytes")
+                if data is not None:
+                    stt.feed_audio(data)
+                    while pending_sends:
+                        await pending_sends.pop(0)
+        except WebSocketDisconnect:
+            pass
+        finally:
+            stt.flush()
+            while pending_sends:
+                await pending_sends.pop(0)
+
+    return app
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(description="voice_gateway: 自前音声UIのFastAPIゲートウェイ")
+    parser.add_argument("--host", default=DEFAULT_HOST)
+    parser.add_argument("--port", type=int, default=DEFAULT_PORT)
+    args = parser.parse_args(argv)
+
+    import uvicorn  # noqa: PLC0415
+
+    app = create_app()
+    uvicorn.run(app, host=args.host, port=args.port)
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
