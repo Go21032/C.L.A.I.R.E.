@@ -6,15 +6,26 @@
 <title>C.L.A.I.R.E. 音声対話</title>
 <!--
   9日目ノート(サポートAI作製計画/9日目自前音声UIとストリーミング音声対話.md)⑥の部品。
+  10日目ノート(サポートAI作製計画/10日目ウェイクワード・キーボード入力対応.md)①②③⑦で、
+  実機テストで見つかった不具合(2問目以降の文字化け)への対策として以下を追加した:
+    ① マイクミュート範囲の拡大: state:thinking/speaking の間も送信を止める
+       (updateMicMute()。以前は再生中(playNext())のみミュートしていた)
+    ③⑦ 音声認識結果の常時プレビュー+手動送信: partial_transcript/final_transcriptは
+       すべてテキスト入力欄(#text-input)へリアルタイムに反映するだけにとどめ、AIへは
+       送らない。ユーザーが内容を確認・修正して送信ボタン/Enterを押した時だけ、
+       text_inputメッセージとしてAIへ送られる(②で作ったウェイクワード自動送信は
+       「無視されても気づけない」という体験の悪さが実機で判明したため撤回した。
+       経緯は10日目ノート⑦参照)
+    + マイクの停止ボタン: 誤動作時にマイク入力そのものを止められるようにする
+
   voice_gateway.py の /ws に接続し、常時マイクON + 無音検出(サーバ側VAD)で
   自動的に発話を送信する。サーバから届く5種類+エラーのJSONメッセージ
-  (partial_transcript / final_transcript / token / sentence / audio / state / error)
-  を処理する。音声(audio)は届いた順に再生キューへ積み、前の再生が終わってから
-  次を再生する(同時再生で音が重なる事故を防ぐ。⑥の作業内容どおり)。
+  (partial_transcript / final_transcript / token / sentence / audio / state / error)を
+  処理する。音声(audio)は届いた順に再生キューへ積み、前の再生が終わってから次を再生する
+  (同時再生で音が重なる事故を防ぐ。9日目⑥の作業内容どおり)。
 
-  実機確認はまだ(⑥残課題)。getUserMediaはセキュアコンテキスト
-  (https または localhost)でしか動かない点に注意(⑦でスマホから使う場合は
-  Tailscale ServeのHTTPS経由にすること)。
+  getUserMediaはセキュアコンテキスト(https または localhost)でしか動かない点に注意
+  (9日目⑦でスマホから使う場合はTailscale ServeのHTTPS経由にすること)。
 -->
 <style>
   :root {
@@ -70,16 +81,17 @@
   .turn { max-width: 760px; padding: 8px 12px; border-radius: 10px; line-height: 1.6; }
   .turn.user { align-self: flex-end; background: var(--accent-dim); }
   .turn.assistant { align-self: flex-start; background: var(--panel); }
-  .turn.partial { opacity: 0.6; font-style: italic; }
   .turn.error { align-self: center; background: transparent; color: var(--error); font-size: 13px; }
 
   footer {
-    padding: 12px 20px 20px;
+    padding: 12px 20px;
     display: flex;
     align-items: center;
     gap: 14px;
     border-top: 1px solid #232a3a;
+    flex-wrap: wrap;
   }
+  footer:last-of-type { padding-bottom: 20px; }
   #mic-indicator {
     width: 14px; height: 14px; border-radius: 50%;
     background: #2a3040;
@@ -99,7 +111,23 @@
     cursor: pointer;
   }
   button:disabled { opacity: 0.5; cursor: default; }
+  #stop-btn { background: #7d2a2a; color: var(--text); }
   #footer-text { color: var(--text-dim); font-size: 13px; }
+
+  /* 10日目③⑦: テキスト入力欄(音声認識結果のリアルタイムプレビュー兼、手動送信欄) */
+  #text-input-bar { gap: 10px; }
+  #text-input {
+    flex: 1;
+    min-width: 200px;
+    background: var(--panel);
+    color: var(--text);
+    border: 1px solid #2a3040;
+    border-radius: 8px;
+    padding: 8px 12px;
+    font-size: 14px;
+  }
+  #text-input:disabled { opacity: 0.5; }
+  #text-input:focus { outline: 1px solid var(--accent); }
 </style>
 </head>
 <body>
@@ -112,8 +140,13 @@
 
 <footer>
   <button id="start-btn">マイクを開始</button>
+  <button id="stop-btn" disabled>マイクを停止</button>
   <span id="mic-indicator" title="マイク入力レベル"></span>
   <span id="footer-text">未接続</span>
+</footer>
+<footer id="text-input-bar">
+  <input id="text-input" type="text" placeholder="話すとここに書き起こされます。間違いを直して送信(Enter)" autocomplete="off" disabled />
+  <button id="send-btn" disabled>送信</button>
 </footer>
 
 <script>
@@ -128,8 +161,11 @@ const SEND_CHUNK_MS = 100;          // ③実機比較結果⑥: 100msチャン�
 const logEl = document.getElementById("log");
 const stateBadge = document.getElementById("state-badge");
 const startBtn = document.getElementById("start-btn");
+const stopBtn = document.getElementById("stop-btn");
 const micIndicator = document.getElementById("mic-indicator");
 const footerText = document.getElementById("footer-text");
+const textInput = document.getElementById("text-input");
+const sendBtn = document.getElementById("send-btn");
 
 // --- 状態 ------------------------------------------------------------
 let ws = null;
@@ -137,8 +173,8 @@ let audioCtx = null;
 let micStream = null;
 let micSource = null;
 let micProcessor = null;
-let micMuted = false;           // 読み上げ中はtrueにしてサーバへ音声を送らない(エコー対策)
-let partialTurnEl = null;       // 暫定テキスト表示中の<div>(確定したら消す)
+let micMuted = false;           // 読み上げ中/推論中はtrueにしてサーバへ音声を送らない(エコー対策+10日目①)
+let currentState = "idle";      // サーバから届いた直近の state 値(10日目①: ミュート判定に使う)
 let assistantTurnEl = null;     // 現在組み立て中の応答表示<div>
 
 // --- 音声再生キュー(⑥「前の再生が終わってから次を再生する」の実装) -----------
@@ -154,11 +190,11 @@ function playNext() {
   const next = playbackQueue.shift();
   if (next === undefined) {
     isPlaying = false;
-    setMicMuted(false); // 再生キューが空になったら聞き取りを再開してよい
+    updateMicMute(); // 再生キューが空になったので、state次第で聞き取りを再開する
     return;
   }
   isPlaying = true;
-  setMicMuted(true); // 読み上げ中はマイクOFF(⑥仕様。エコー対策)
+  updateMicMute(); // 読み上げ中はマイクOFF(9日目⑥仕様。エコー対策)
 
   const audio = new Audio(`data:audio/wav;base64,${next}`);
   audio.addEventListener("ended", playNext);
@@ -177,6 +213,15 @@ function setMicMuted(muted) {
   micIndicator.classList.toggle("active", !muted && !!micStream);
 }
 
+// 10日目①:⓪で特定した根本原因の直接修正。以前は「音声再生中(isPlaying)」しか
+// ミュートしておらず、state:thinking(LLM推論中、まだ音声が1つも届いていない区間)は
+// 無防備でマイクが開いたままだった。ここで「再生中」と「state:thinking/speaking」の
+// 両方を見て一元的にミュート判定する(playNext()・setState()の両方から呼ぶ)。
+function updateMicMute() {
+  const shouldMute = isPlaying || currentState === "thinking" || currentState === "speaking";
+  setMicMuted(shouldMute);
+}
+
 // --- ログ表示 ----------------------------------------------------------
 function appendTurn(text, cls) {
   const div = document.createElement("div");
@@ -193,25 +238,35 @@ function logError(message) {
 }
 
 function setState(state) {
+  currentState = state;
   stateBadge.textContent = state;
   stateBadge.dataset.state = state;
+  updateMicMute();       // 10日目①: thinking/speaking突入・離脱のたびにミュート判定をやり直す
+  updateTextInputEnabled(); // 10日目③: 音声と同じ排他制御をテキスト入力欄にも効かせる
 }
 
 // --- WebSocketメッセージ処理 ---------------------------------------------
 // voice_gateway.py のWSメッセージ仕様(5種類+error):
 //   partial_transcript / final_transcript / token / sentence / audio / state / error
+//
+// voice_gateway.py側の10日目⑦の設計により、この2種類は役割がはっきり分かれている:
+//   - partial_transcript: Voskの暫定認識 と faster-whisperの確定認識の両方がここに乗る
+//     (サーバはAIへ渡すかどうかをまだ決めていない、単なる書き起こしのプレビュー)。
+//     テキスト入力欄(#text-input)へリアルタイムに反映するだけ。
+//   - final_transcript: ユーザーが送信ボタン/Enterでtext_inputを送り、サーバが実際に
+//     AIへの処理を開始したことの通知。画面上部のログへ「ユーザー発言」として表示するのは
+//     このケースだけ(sendTextInput()参照)。
 function handleMessage(msg) {
   switch (msg.type) {
     case "partial_transcript":
-      if (!partialTurnEl) partialTurnEl = appendTurn("", "user partial");
-      partialTurnEl.textContent = msg.text;
+      // 話している最中(暫定)〜発話の区切りが確定した直後まで、常にここが呼ばれる。
+      // 話し始めたら常にリアルタイムで入力欄へ反映する(ブラウザ側での編集途中に
+      // 次の発話で上書きされうる点は既知のトレードオフ。10日目⑦で意図的に選んだ挙動)。
+      textInput.value = msg.text;
       break;
 
     case "final_transcript":
-      if (partialTurnEl) {
-        partialTurnEl.remove();
-        partialTurnEl = null;
-      }
+      // サーバが実際にAIへの処理を開始した(=送信が受理された)ことの通知。
       appendTurn(msg.text, "user");
       assistantTurnEl = null; // 新しいターンなので応答表示をリセット
       break;
@@ -296,8 +351,30 @@ async function startMic() {
   micSource.connect(micProcessor);
   micProcessor.connect(audioCtx.destination);
 
-  setMicMuted(false);
+  updateMicMute();
   footerText.textContent = "聞き取り中...";
+}
+
+// マイクの停止ボタン(10日目追加分)。誤動作時・離席時などにマイク入力そのものを
+// 止められるようにする。WebSocket接続自体は維持し(サーバ側のセッションは保つ)、
+// ローカルのマイクキャプチャだけを止める。再開は「マイクを開始」ボタンから行う。
+function stopMic() {
+  if (micProcessor) {
+    micProcessor.disconnect();
+    micProcessor.onaudioprocess = null;
+    micProcessor = null;
+  }
+  if (micSource) {
+    micSource.disconnect();
+    micSource = null;
+  }
+  if (micStream) {
+    micStream.getTracks().forEach((track) => track.stop());
+    micStream = null;
+  }
+  setMicMuted(true);
+  micIndicator.classList.remove("active");
+  footerText.textContent = "マイクを停止しました";
 }
 
 // 線形補間による簡易リサンプル(48kHz等 → 16kHz) + Float32 → Int16 PCM変換。
@@ -355,6 +432,7 @@ function connect() {
   };
   ws.onerror = () => logError("WebSocket接続でエラーが発生しました");
   ws.onclose = () => {
+    updateTextInputEnabled();
     if (intentionalClose) {
       footerText.textContent = "切断しました";
       setState("idle");
@@ -368,16 +446,59 @@ function connect() {
   };
 }
 
+// --- テキスト入力欄(10日目③⑦) --------------------------------------------
+// 音声認識結果のリアルタイムプレビュー(partial_transcript/final_transcript、上の
+// handleMessage参照)を表示しつつ、キーボードでの修正・手動送信を受け付ける唯一の
+// 入力確定経路。音声由来・キーボード入力由来を問わず、ここで送信ボタン/Enterを
+// 押さない限りAIへは一切送られない(10日目⑦でウェイクワード自動送信を撤回したため)。
+// state:thinking/speakingの間は送信不可にする(音声と同じターンの排他制御)。
+function canSendText() {
+  return !!ws && ws.readyState === WebSocket.OPEN && currentState !== "thinking" && currentState !== "speaking";
+}
+
+function updateTextInputEnabled() {
+  const enabled = canSendText();
+  textInput.disabled = !enabled;
+  sendBtn.disabled = !enabled;
+}
+
+function sendTextInput() {
+  const text = textInput.value.trim();
+  if (!text || !canSendText()) return;
+  ws.send(JSON.stringify({ type: "text_input", text }));
+  textInput.value = "";
+}
+
+sendBtn.addEventListener("click", sendTextInput);
+textInput.addEventListener("keydown", (e) => {
+  // isComposing: IME変換中のEnter確定でうっかり送信しないようにする
+  if (e.key === "Enter" && !e.isComposing) {
+    e.preventDefault();
+    sendTextInput();
+  }
+});
+
 // --- 起動 -----------------------------------------------------------------
 startBtn.addEventListener("click", async () => {
   startBtn.disabled = true;
   try {
-    connect();
+    if (!ws || ws.readyState === WebSocket.CLOSED) {
+      intentionalClose = false;
+      connect();
+    }
     await startMic();
+    stopBtn.disabled = false;
+    updateTextInputEnabled();
   } catch (e) {
     logError(`マイクの初期化に失敗: ${e}`);
     startBtn.disabled = false;
   }
+});
+
+stopBtn.addEventListener("click", () => {
+  stopMic();
+  startBtn.disabled = false;
+  stopBtn.disabled = true;
 });
 </script>
 </body>

@@ -18,14 +18,33 @@ voice_gateway.py
            トークン列を sentence_splitter で文に切り、1文ずつ tts_adapter.synthesize()
        すべてWSメッセージとしてブラウザへ順次push(音声はbase64)
 
-WSメッセージ仕様(JSON。5種類+エラー。⑥の作業内容どおりノートにも転記すること):
-    {"type": "partial_transcript", "text": str}                  # STT暫定(Vosk)
-    {"type": "final_transcript", "text": str}                    # STT確定(faster-whisper)
+WSメッセージ仕様(JSON。サーバ → クライアント):
+    {"type": "partial_transcript", "text": str}                  # STT暫定/確定(Vosk/faster-whisper)。
+                                                                    # AIへは渡さず、クライアント側の
+                                                                    # テキスト入力欄をリアルタイムに更新するだけ
+    {"type": "final_transcript", "text": str}                    # 実際にAIへ処理させる、確定・送信済みの発話
+                                                                    # (テキスト入力欄で送信ボタン/Enterを押した内容。
+                                                                    #  画面上部のログにユーザー発言として表示される)
     {"type": "token", "text": str}                                # LLM生成トークン(逐次)
     {"type": "sentence", "text": str}                             # 確定した1文
     {"type": "audio", "text": str, "wav_b64": str}                # 1文ぶんのTTS wav(base64)
     {"type": "state", "value": "listening"|"thinking"|"speaking"|"idle"}
     {"type": "error", "stage": str, "message": str}
+
+WSメッセージ仕様(クライアント → サーバ。既存はバイナリ音声フレームのみ):
+    {"type": "text_input", "text": str}                           # テキスト入力欄の送信ボタン/Enter。
+                                                                    # 音声由来・キーボード入力由来を問わず、
+                                                                    # ユーザーが内容を確認・確定した発話はすべてここを通る
+
+10日目ノート(サポートAI作製計画/10日目ウェイクワード・キーボード入力対応.md)で、
+「AIが考えている間に次の発言をすると誤って次ターンとして処理される」不具合の
+再発防止として、当初②ウェイクワード方式(Hey Siri型。「ねえクレア」と言わない限り
+コマンド化しない)を実装したが、実機で使ってみたところ「無視されても気づけない」
+「聞き取り結果がそのまま消えてしまう」という体験の悪さが判明した。そのため⑦で
+ウェイクワード自動送信を全面的に撤回し、**音声認識結果(暫定・確定を問わず)は常に
+テキスト入力欄へリアルタイムに反映するだけにとどめ、ユーザーが内容を確認・修正して
+送信ボタン/Enterを押した時だけAIへ処理させる**方式に変更した(詳細はノート⑦参照。
+`wake_word.py`/`decide_wake_action()`は不要になったため削除した)。
 
 `run_turn()`はWebSocket/FastAPIに一切依存しない純粋なジェネレータにしてあり、
 `tests/test_voice_gateway.py`でPipe/TTSをフェイクに差し替えてロジック
@@ -38,6 +57,7 @@ from __future__ import annotations
 
 import argparse
 import base64
+import json
 import sys
 from pathlib import Path
 from typing import Callable, Iterator
@@ -242,7 +262,11 @@ def create_app(
             _schedule(send_json({"type": "partial_transcript", "text": text}))
 
         def on_final(text: str) -> None:
-            _schedule(_handle_final_transcript(text))
+            # 10日目⑦:ウェイクワード自動送信は撤回した。STTが確定させたテキストも
+            # AIへは渡さず、partial_transcriptと同じ扱いでクライアントのテキスト入力欄へ
+            # 反映するだけにとどめる(ユーザーが内容を確認・修正して送信ボタン/Enterを
+            # 押した時だけ、下のtext_input分岐からrun_turn()が呼ばれる)。
+            _schedule(send_json({"type": "partial_transcript", "text": text}))
 
         def on_stt_error(message: str) -> None:
             # STTEngine._finalize()が確定転写(faster-whisper)の失敗をcatchして
@@ -280,8 +304,25 @@ def create_app(
                         await send_json(
                             {"type": "error", "stage": "stt", "message": f"{type(e).__name__}: {e}"}
                         )
-                    while pending_sends:
-                        await pending_sends.pop(0)
+                else:
+                    text_data = message.get("text")
+                    if text_data is not None:
+                        # 10日目③/⑦:テキスト入力欄の送信ボタン/Enter。音声由来・キーボード
+                        # 入力由来を問わず、ユーザーが内容を確認・確定した発話はすべてここを
+                        # 通って直接コマンド処理へ回る(現在はこれが唯一のコマンド化経路)。
+                        try:
+                            payload = json.loads(text_data)
+                        except (TypeError, ValueError) as e:
+                            await send_json(
+                                {"type": "error", "stage": "text_input", "message": f"invalid JSON: {e}"}
+                            )
+                        else:
+                            if payload.get("type") == "text_input":
+                                user_text = (payload.get("text") or "").strip()
+                                if user_text:
+                                    await _handle_final_transcript(user_text)
+                while pending_sends:
+                    await pending_sends.pop(0)
         except WebSocketDisconnect:
             pass
         finally:

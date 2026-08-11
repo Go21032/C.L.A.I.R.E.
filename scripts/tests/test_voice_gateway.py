@@ -4,11 +4,13 @@ tests/test_voice_gateway.py
 9日目ノート⑥:`voice_gateway.run_turn()` のユニットテスト。
 
 `run_turn()`はFastAPI/WebSocketに依存しない「1ターン分の会話オーケストレーション」の
-純粋なジェネレータ(`support_ai_auto_pipe.Pipe.pipe()`を呼び、④の`generate_stream()`が
-返すトークン列を⑤の`sentence_splitter`で文に切り、1文ずつTTSへ回してWSメッセージの
-形で返す)。WebSocket自体・実際のPipe/TTSはここでは検証しない
-(実機確認は本ノート⑥残課題)。ここでは「トークン→文→音声」のオーケストレーションと
+純粋なジェネレータ。WebSocket自体・実際のPipe/TTS/STTはここでは検証しない
+(実機確認は10日目ノート⑤の残課題)。ここでは「トークン→文→音声」のオーケストレーション、
 エラー時にUIが無反応にならないことをフェイクで検証する。
+
+(10日目ノート②で追加したウェイクワード判定(`decide_wake_action()`)は、⑦の設計変更で
+撤回・削除した。`wake_word.py`/`tests/test_wake_word.py`も合わせて削除済み。経緯は
+10日目ノート⑦参照)
 """
 
 from __future__ import annotations
