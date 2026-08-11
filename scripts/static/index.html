@@ -329,11 +329,20 @@ function floatToInt16(float32) {
 }
 
 // --- WebSocket接続 -------------------------------------------------------
+// サーバ側の想定外の例外(STT/Pipe/TTSの一時的な失敗等)でWebSocketそのものが
+// 落ちるケースがまだ完全には防ぎきれない(voice_gateway.py側でも極力catchしているが、
+// ネットワーク瞬断等サーバ側の問題ではない切断もありうる)。過去の実機確認で
+// 「切断されたらページ再読み込みしないとマイクが使えない」という体験の悪さが
+// 見つかったため、意図的な切断でない限り自動的に再接続する。
+let reconnectAttempts = 0;
+let intentionalClose = false;
+
 function connect() {
   ws = new WebSocket(WS_URL);
   ws.binaryType = "arraybuffer";
 
   ws.onopen = () => {
+    reconnectAttempts = 0;
     footerText.textContent = "接続しました";
     setState("listening");
   };
@@ -346,8 +355,16 @@ function connect() {
   };
   ws.onerror = () => logError("WebSocket接続でエラーが発生しました");
   ws.onclose = () => {
-    footerText.textContent = "切断されました(再接続していません)";
+    if (intentionalClose) {
+      footerText.textContent = "切断しました";
+      setState("idle");
+      return;
+    }
+    reconnectAttempts += 1;
+    const delayMs = Math.min(1000 * reconnectAttempts, 5000);
+    footerText.textContent = `切断されました。${(delayMs / 1000).toFixed(1)}秒後に再接続します...`;
     setState("idle");
+    setTimeout(connect, delayMs);
   };
 }
 

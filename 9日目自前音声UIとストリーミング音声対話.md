@@ -925,6 +925,29 @@ python voice_gateway.py --host 127.0.0.1 --port 5055
 - ブラウザの自動再生ポリシー(ユーザー操作なしの`audio.play()`がブロックされる場合がある)への対応。「マイクを開始」ボタン押下がユーザー操作にあたるため通常は問題ないはずだが実機確認が必要
 - スマホのブラウザでの動作確認(⑦の作業。マイク周りの挙動がPCと異なる可能性)
 
+#### 実機確認(2026-08-11)1回目:2件のバグを発見・修正
+
+自宅PCブラウザで初めて実際にマイクを使って話したところ、2件の実害が出た。**両方とも修正済み**。
+
+**バグ1:確定転写(Whisper)が一度も成功せず、暫定表示(Vosk)の荒い認識結果がそのまま「確定テキスト」のように見えていた**
+
+「hello クレア今日は何をしたらいいかなぁ」と話しかけたところ、画面には「腹 を くれ や こ 今日 は 何 を し たら いい か なぁ」という、単語ごとに空白の入った崩れたテキストが表示された。この空白区切りのパターンは③実機比較結果⑥で見たVoskの暫定表示の特徴そのものであり、faster-whisperの確定転写ではない。
+
+原因を辿ると、`create_default_engine()`内の`transcribe_final()`が、PCM16→float変換した結果を**plain PythonのList**のまま`WhisperModel.transcribe()`に渡していた。faster-whisperの`transcribe()`は`isinstance(audio, np.ndarray)`でなければファイルパス/ファイルオブジェクトとして扱おうとする(`decode_audio()`が`av.open()`に渡す)ため、**listを渡すと`ValueError: File object has no read() method, or readable() returned False.`が毎回発生していた**(実機で再現確認済み)。
+
+- この例外は`STTEngine._finalize()`内で無catchのまま外へ伝播していた(バグ2と直結)。
+- 結果、`on_final`(Whisperの確定結果)は一度も呼ばれず、`on_partial`(Voskの暫定結果)がブラウザに表示されたまま更新が止まる→ユーザーからは「認識精度が低い」ように見えていた。**これは精度の問題ではなく、確定転写(精度の高い方)が実行されていなかったバグ**。
+- 修正:新たに`pcm16_bytes_to_waveform()`関数(numpyのfloat32配列を返す)を追加し、`transcribe_final()`はこれを経由してWhisperへ渡すようにした。実機のfaster-whisperで動作確認済み(`sample01.wav`で「クレアです。C.L.A.I.R.E.、呼んでください。」を正しく取得。参考正解「クレアです。C.L.A.I.R.E.と呼んでください。」とほぼ一致)。
+
+**バグ2:確定転写が失敗すると、WebSocket接続ごと落ちて再接続もしなかった**
+
+上記のバグ1(`ValueError`)が`STTEngine.feed_audio()`から`voice_gateway.py`のWebSocketハンドラまで無catchで伝播し、⑥実装時に踏んだ「FastAPIのWebSocketが無言で閉じる」現象と同じ形で接続が切断されていた。ブラウザ側は「切断されました(再接続していません)」と表示されたまま、ページを再読み込みしないとマイクが使えなかった。これは**仕様ではなくバグ**(⑥の作業内容「エラー時にUIが無反応にならないようにする」を満たせていなかった)。
+
+- 修正1(`stt_engine.py`):`STTEngine`に`on_error`コールバックを追加し、`_finalize()`内で`transcribe_final`/`correct_final`の例外をcatchして`on_error`へ回すようにした。バッファ・VAD状態はリセットするため、**1回の確定転写が失敗しても次の発話は正常に処理できる**(テストで担保)。
+- 修正2(`voice_gateway.py`):`on_error`を`{"type":"error","stage":"stt",...}`としてWSへ送るよう配線。さらに`stt.feed_audio()`呼び出し自体も念のためtry/exceptで囲み、二重の安全網にした。
+- 修正3(`static/index.html`):上記を修正してもネットワーク瞬断等サーバ以外の要因で切断されうるため、**意図的な切断でない限り自動的に再接続する**ロジック(`ws.onclose`で1〜5秒のバックオフ後に`connect()`を再実行)を追加した。これで「ページ再読み込みが必要」という体験の悪さを解消した。
+- ユニットテスト5件追加(`test_transcribe_final_exception_calls_on_error_not_on_final`等、`test_pcm16_bytes_to_waveform`等)。実機のfaster-whisperに対しても`pcm16_bytes_to_waveform()`経由で転写が成功することを確認済み。全174件パス。
+
 ---
 
 ## ⑦ Tailscale Serveへの載せ替えと、外出時のCODEルート方針の決定

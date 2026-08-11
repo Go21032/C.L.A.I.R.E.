@@ -62,6 +62,24 @@ def correct_zunko(text: str) -> str:
     return corrected
 
 
+def pcm16_bytes_to_waveform(pcm: bytes):
+    """16bit PCM(mono)のバイト列を、faster-whisperが要求するfloat32のnumpy配列に変換する。
+
+    9日目⑥実機確認(2026-08-11)で踏んだバグの修正:
+    `WhisperModel.transcribe()`は`isinstance(audio, np.ndarray)`でない引数を
+    ファイルパス/ファイルオブジェクトとして扱おうとする(`decode_audio()`が
+    `av.open()`に渡す)。plain Pythonのlistを渡すと
+    `ValueError: File object has no read() method, or readable() returned False.`
+    で毎回失敗し、確定転写(Whisper)が一度も成功しないまま暫定表示(Vosk)の
+    荒い認識結果だけが画面に残る、という実害が出た(認識精度低下に見えたが実際は
+    確定転写が動いていなかった)。必ずこの関数でndarrayに変換してから渡すこと。
+    """
+    import numpy as np
+
+    samples = np.frombuffer(pcm, dtype="<i2")
+    return samples.astype(np.float32) / 32768.0
+
+
 class Recognizer(Protocol):
     """VoskのKaldiRecognizerが満たすべき最小プロトコル(テストではフェイクで差し替える)。"""
 
@@ -85,6 +103,12 @@ class STTEngine:
         correct_final: 確定テキストへ適用する後処理。既定は`correct_zunko`。
         on_partial: 暫定テキストが変化するたびに呼ぶコールバック。
         on_final: 確定テキストが出るたびに呼ぶコールバック(辞書補正済み)。
+        on_error: `transcribe_final`/`correct_final`が例外を送出した場合に呼ぶ
+            コールバック。9日目⑥実機確認(2026-08-11)で、この処理をcatchしていなかった
+            ために`feed_audio()`の例外がWebSocketハンドラまで伝播し、接続ごと落ちて
+            ブラウザ側が「切断されました」のままマイクを再開できなくなる実害が出た。
+            そのため確定転写の失敗は例外を投げずにここへ回し、エンジン自体は
+            (バッファ・VAD状態をリセットして)次の発話に備え続ける。
     """
 
     recognizer: Recognizer
@@ -93,6 +117,7 @@ class STTEngine:
     correct_final: Callable[[str], str] = correct_zunko
     on_partial: Callable[[str], None] | None = None
     on_final: Callable[[str], None] | None = None
+    on_error: Callable[[str], None] | None = None
 
     _pcm_buffer: bytearray = field(default_factory=bytearray, init=False, repr=False)
     _last_partial: str = field(default="", init=False, repr=False)
@@ -144,8 +169,13 @@ class STTEngine:
         self.vad.reset()
         if not pcm:
             return
-        text = self.transcribe_final(pcm)
-        text = self.correct_final(text)
+        try:
+            text = self.transcribe_final(pcm)
+            text = self.correct_final(text)
+        except Exception as e:  # noqa: BLE001 - 確定転写の失敗で接続そのものを落とさない
+            if self.on_error:
+                self.on_error(f"{type(e).__name__}: {e}")
+            return
         if self.on_final:
             self.on_final(text)
 
@@ -159,6 +189,7 @@ def create_default_engine(
     initial_prompt: str | None = DEFAULT_INITIAL_PROMPT,
     on_partial: Callable[[str], None] | None = None,
     on_final: Callable[[str], None] | None = None,
+    on_error: Callable[[str], None] | None = None,
 ) -> STTEngine:
     """実物のVosk + faster-whisperでSTTEngineを組み立てる(⑥の実運用向け)。
 
@@ -179,11 +210,10 @@ def create_default_engine(
     whisper = WhisperModel(whisper_model, device=device, compute_type=compute_type)
 
     def transcribe_final(pcm: bytes) -> str:
-        import array
-
-        samples = array.array("h")
-        samples.frombytes(pcm)
-        waveform = [s / 32768.0 for s in samples]
+        # pcm16_bytes_to_waveform()でndarrayに変換してから渡すこと。
+        # plain listのままだとWhisperModel.transcribe()が毎回ValueErrorになる
+        # (関数のdocstring参照。9日目⑥実機確認2026-08-11で発見した実バグ)。
+        waveform = pcm16_bytes_to_waveform(pcm)
         segments, _info = whisper.transcribe(
             waveform, language="ja", initial_prompt=initial_prompt
         )
@@ -194,4 +224,5 @@ def create_default_engine(
         transcribe_final=transcribe_final,
         on_partial=on_partial,
         on_final=on_final,
+        on_error=on_error,
     )

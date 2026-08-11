@@ -161,7 +161,9 @@ def run_turn(
 def create_app(
     *,
     pipe_factory: Callable[[], object] | None = None,
-    stt_engine_factory: Callable[[Callable[[str], None], Callable[[str], None]], object] | None = None,
+    stt_engine_factory: (
+        Callable[[Callable[[str], None], Callable[[str], None], Callable[[str], None]], object] | None
+    ) = None,
     synthesize: Callable[[str], bytes] | None = None,
 ):
     """FastAPIアプリを組み立てる。
@@ -199,7 +201,7 @@ def create_app(
 
         return synth
 
-    def _default_stt_engine_factory(on_partial, on_final):
+    def _default_stt_engine_factory(on_partial, on_final, on_error):
         import os  # noqa: PLC0415
 
         from stt_engine import create_default_engine  # noqa: PLC0415
@@ -208,7 +210,10 @@ def create_app(
             "VOSK_MODEL_DIR", str(Path.home() / "vosk_models" / "vosk-model-small-ja-0.22")
         )
         return create_default_engine(
-            vosk_model_dir=vosk_model_dir, on_partial=on_partial, on_final=on_final
+            vosk_model_dir=vosk_model_dir,
+            on_partial=on_partial,
+            on_final=on_final,
+            on_error=on_error,
         )
 
     pipe_factory = pipe_factory or _default_pipe_factory
@@ -239,6 +244,13 @@ def create_app(
         def on_final(text: str) -> None:
             _schedule(_handle_final_transcript(text))
 
+        def on_stt_error(message: str) -> None:
+            # STTEngine._finalize()が確定転写(faster-whisper)の失敗をcatchして
+            # ここへ回してくる(2026-08-11実機確認で発見した実バグの修正。
+            # stt_engine.STTEngineのdocstring参照)。接続は落とさず、暫定表示は
+            # 消してエラーを通知するだけにとどめ、次の発話をそのまま受け付ける。
+            _schedule(send_json({"type": "error", "stage": "stt", "message": message}))
+
         pending_sends: list = []
 
         def _schedule(coro) -> None:
@@ -253,7 +265,7 @@ def create_app(
             for event in run_turn(pipe, chat_id, text, synthesize=synthesize):
                 await send_json(event)
 
-        stt = stt_engine_factory(on_partial, on_final)
+        stt = stt_engine_factory(on_partial, on_final, on_stt_error)
 
         try:
             while True:
@@ -262,7 +274,12 @@ def create_app(
                     break
                 data = message.get("bytes")
                 if data is not None:
-                    stt.feed_audio(data)
+                    try:
+                        stt.feed_audio(data)
+                    except Exception as e:  # noqa: BLE001 - STT側の想定外の失敗で接続を落とさない
+                        await send_json(
+                            {"type": "error", "stage": "stt", "message": f"{type(e).__name__}: {e}"}
+                        )
                     while pending_sends:
                         await pending_sends.pop(0)
         except WebSocketDisconnect:
