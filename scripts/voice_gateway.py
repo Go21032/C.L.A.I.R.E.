@@ -19,9 +19,18 @@ voice_gateway.py
        すべてWSメッセージとしてブラウザへ順次push(音声はbase64)
 
 WSメッセージ仕様(JSON。サーバ → クライアント):
-    {"type": "partial_transcript", "text": str}                  # STT暫定/確定(Vosk/faster-whisper)。
+    {"type": "partial_transcript", "text": str, "final": bool}   # STT暫定/確定(Vosk/faster-whisper)。
                                                                     # AIへは渡さず、クライアント側の
-                                                                    # テキスト入力欄をリアルタイムに更新するだけ
+                                                                    # テキスト入力欄をリアルタイムに更新するだけ。
+                                                                    # "final"は2026-08-12追加: on_partial(Vosk暫定)
+                                                                    # では常にFalse、on_final(faster-whisper確定。
+                                                                    # VADが発話終了を検知した直後)ではTrueになる。
+                                                                    # クライアント(static/index.html)は既存どおり
+                                                                    # msg.textしか見ないため後方互換。追加した狙いは
+                                                                    # 11日目ノート⑤の自動計測(ws_e2e_bench.py)が
+                                                                    # 「暫定表示の更新」と「VAD+STT確定の瞬間」を
+                                                                    # 外部から区別できるようにするため
+                                                                    # (この2つは元々同じmessage typeで区別不能だった)。
     {"type": "final_transcript", "text": str}                    # 実際にAIへ処理させる、確定・送信済みの発話
                                                                     # (テキスト入力欄で送信ボタン/Enterを押した内容。
                                                                     #  画面上部のログにユーザー発言として表示される)
@@ -259,14 +268,16 @@ def create_app(
             await websocket.send_json(msg)
 
         def on_partial(text: str) -> None:
-            _schedule(send_json({"type": "partial_transcript", "text": text}))
+            _schedule(send_json({"type": "partial_transcript", "text": text, "final": False}))
 
         def on_final(text: str) -> None:
             # 10日目⑦:ウェイクワード自動送信は撤回した。STTが確定させたテキストも
             # AIへは渡さず、partial_transcriptと同じ扱いでクライアントのテキスト入力欄へ
             # 反映するだけにとどめる(ユーザーが内容を確認・修正して送信ボタン/Enterを
             # 押した時だけ、下のtext_input分岐からrun_turn()が呼ばれる)。
-            _schedule(send_json({"type": "partial_transcript", "text": text}))
+            # "final": True(2026-08-12追加)は、VADが発話終了を検知しfaster-whisperの
+            # 確定転写が終わった瞬間を外部(ws_e2e_bench.py)が識別するためのフラグ。
+            _schedule(send_json({"type": "partial_transcript", "text": text, "final": True}))
 
         def on_stt_error(message: str) -> None:
             # STTEngine._finalize()が確定転写(faster-whisper)の失敗をcatchして

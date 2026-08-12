@@ -1,0 +1,102 @@
+[
+  {
+    "round": 0,
+    "audio_path": "results\\stt_bench\\sample01.wav",
+    "stt_text": "クレアデスC.L.A.I.R.E.ご呼んでください",
+    "error": null,
+    "t_speech_end": 8.492611599998781,
+    "t_stt_final": 23.75873859999956,
+    "t_text_input_sent": 23.758769899999606,
+    "turn_timeout": true,
+    "seg_speech_end_to_stt_final": 15.266127000000779,
+    "seg_first_token_after_send": NaN,
+    "seg_first_sentence_after_send": NaN,
+    "seg_first_audio_after_send": NaN,
+    "seg_total_after_send": NaN,
+    "messages": [
+      {
+        "t": 7.1035,
+        "type": "partial_transcript",
+        "text": "クレア",
+        "final": false
+      },
+      {
+        "t": 7.9772,
+        "type": "partial_transcript",
+        "text": "クレア です",
+        "final": false
+      },
+      {
+        "t": 7.9773,
+        "type": "partial_transcript",
+        "text": "クレア です し",
+        "final": false
+      },
+      {
+        "t": 19.0647,
+        "type": "partial_transcript",
+        "text": "クレア です し 得る",
+        "final": false
+      },
+      {
+        "t": 19.2407,
+        "type": "partial_transcript",
+        "text": "クレア です 強い エル Ａ",
+        "final": false
+      },
+      {
+        "t": 20.9113,
+        "type": "partial_transcript",
+        "text": "クレア です 強い エル Ａ Ｉ",
+        "final": false
+      },
+      {
+        "t": 22.2005,
+        "type": "partial_transcript",
+        "text": "クレア です 強い エル Ａ ハイ アール",
+        "final": false
+      },
+      {
+        "t": 22.2005,
+        "type": "partial_transcript",
+        "text": "クレア です 強い エル Ａ Ｉ ある",
+        "final": false
+      },
+      {
+        "t": 22.2005,
+        "type": "partial_transcript",
+        "text": "クレア です 強い エル Ａ Ｉ ある 日",
+        "final": false
+      },
+      {
+        "t": 22.2005,
+        "type": "partial_transcript",
+        "text": "クレア です 強い エル Ａ Ｉ ある",
+        "final": false
+      },
+      {
+        "t": 22.2005,
+        "type": "partial_transcript",
+        "text": "クレア です 強い エル Ａ Ｉ ある 日 後 読ん で",
+        "final": false
+      },
+      {
+        "t": 23.7587,
+        "type": "partial_transcript",
+        "text": "クレア です 強い エル Ａ Ｉ ある 日 後 読ん で ください",
+        "final": false
+      },
+      {
+        "t": 23.7587,
+        "type": "partial_transcript",
+        "text": "クレアデスC.L.A.I.R.E.ご呼んでください",
+        "final": true
+      },
+      {
+        "t": 25.7341,
+        "type": "final_transcript",
+        "text": "クレアデスC.L.A.I.R.E.ご呼んでください"
+      }
+    ]
+  }
+]
