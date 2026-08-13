@@ -41,9 +41,22 @@ WSメッセージ仕様(JSON。サーバ → クライアント):
     {"type": "error", "stage": str, "message": str}
 
 WSメッセージ仕様(クライアント → サーバ。既存はバイナリ音声フレームのみ):
-    {"type": "text_input", "text": str}                           # テキスト入力欄の送信ボタン/Enter。
+    {"type": "text_input", "text": str, "images": [str, ...]}    # テキスト入力欄の送信ボタン/Enter。
                                                                     # 音声由来・キーボード入力由来を問わず、
-                                                                    # ユーザーが内容を確認・確定した発話はすべてここを通る
+                                                                    # ユーザーが内容を確認・確定した発話はすべてここを通る。
+                                                                    # "images"(11日目④-1で追加)は任意。
+                                                                    # base64エンコード済み画像(data URL prefix無し)の
+                                                                    # リストで、指定するとそのターンだけルーターを
+                                                                    # 経由せず強制的にDEEP(gemma4:26b)へルーティング
+                                                                    # される(run_turn()→support_ai_auto_pipe.Pipe参照)。
+                                                                    # 📎の文書添付(/documents)と異なりDBへの永続登録はしない。
+
+HTTP エンドポイント(11日目④: PDF/Word/Excel/PowerPointのナレッジ取り込み。WSとは別立て):
+    POST   /documents            multipart/form-data(file)。抽出→チャンク化→LanceDBへ永続登録。
+                                  戻り値 {"filename": str, "chunks": int}
+    GET    /documents            登録済みナレッジの一覧([{"filename","chunks","date"}, ...])
+    DELETE /documents/{filename} 指定ファイル名のナレッジを削除。戻り値 {"filename","deleted"}
+    実体は rag_memory/doc_ingest.py。画像は対象外(11日目ノートに追記した検討事項を参照)。
 
 10日目ノート(サポートAI作製計画/10日目ウェイクワード・キーボード入力対応.md)で、
 「AIが考えている間に次の発言をすると誤って次ターンとして処理される」不具合の
@@ -77,6 +90,11 @@ if str(SCRIPT_DIR) not in sys.path:
 OPENWEBUI_PIPE_DIR = SCRIPT_DIR / "openwebui_pipe"
 if str(OPENWEBUI_PIPE_DIR) not in sys.path:
     sys.path.insert(0, str(OPENWEBUI_PIPE_DIR))
+# 11日目④: PDF/Word/Excel/PowerPoint取り込み(doc_ingest.py)は rag_memory/ 配下にある
+# (memory_store.py/chunker.pyと同じ場所。config.yamlのパス解決を共有するため)。
+RAG_MEMORY_DIR = SCRIPT_DIR / "rag_memory"
+if str(RAG_MEMORY_DIR) not in sys.path:
+    sys.path.insert(0, str(RAG_MEMORY_DIR))
 
 from sentence_splitter import SentenceSplitter  # noqa: E402
 
@@ -91,15 +109,18 @@ from sentence_splitter import SentenceSplitter  # noqa: E402
 # `run_turn()`は単体で使いたいことがあるため、失敗時はNoneのままにしてcreate_app()側で
 # 分かりやすいエラーを出す。
 try:
-    from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+    from fastapi import FastAPI, File, HTTPException, UploadFile, WebSocket, WebSocketDisconnect
     from fastapi.responses import FileResponse
     from fastapi.staticfiles import StaticFiles
 except ImportError:  # pragma: no cover - fastapi未インストール環境でのrun_turn単体利用向け
-    FastAPI = WebSocket = WebSocketDisconnect = FileResponse = StaticFiles = None  # type: ignore
+    FastAPI = File = HTTPException = UploadFile = WebSocket = WebSocketDisconnect = FileResponse = StaticFiles = None  # type: ignore
 
 DEFAULT_HOST = "127.0.0.1"  # tailnet外に晒さないため待受はlocalhost固定(外部公開はTailscale Serveに任せる)
 DEFAULT_PORT = 5055
 TARGET_SAMPLE_RATE = 16000
+# 11日目④: ナレッジ取り込みの暴走防止(巨大PDF等の誤操作でメモリ/embedding時間を
+# 食い潰さないための安全弁。上限自体に強い根拠はなく、実運用で必要なら調整する)。
+DOC_UPLOAD_MAX_BYTES = 20 * 1024 * 1024
 
 
 # ---------------------------------------------------------------------------
@@ -141,6 +162,7 @@ def run_turn(
     *,
     synthesize: Callable[[str], bytes],
     splitter_kwargs: dict | None = None,
+    images: list[str] | None = None,
 ) -> Iterator[dict]:
     """1ターン分の会話を実行し、WSへそのまま送れるdictメッセージを順次yieldする。
 
@@ -152,14 +174,24 @@ def run_turn(
     「エラー時にUIが無反応にならないようにする」の実装)。Pipe呼び出し自体が失敗した場合、
     TTS合成が1文だけ失敗した場合のいずれも`{"type": "error", ...}`を返しつつ、
     残りの処理(他の文の合成・最後のstate: idle送出)は続行する。
+
+    images: 11日目④-1「画像添付時はDEEPへ強制ルーティング」対応。base64エンコード済み
+    画像(data URL prefix無し)のリスト。指定されると、最後のuserメッセージ辞書に
+    `"images"`キーとして載せて`pipe.pipe()`へ渡す(support_ai_auto_pipe.Pipe側の
+    `_extract_last_user_images()`が読む独自convention)。Noneのままなら従来どおり
+    `content`のみのメッセージになり、既存の呼び出し元の挙動は変わらない。
     """
     yield {"type": "state", "value": "thinking"}
 
     splitter = SentenceSplitter(**(splitter_kwargs or {}))
 
+    user_message: dict = {"role": "user", "content": user_text}
+    if images:
+        user_message["images"] = images
+
     try:
         reply = pipe.pipe(
-            body={"messages": [{"role": "user", "content": user_text}], "stream": True},
+            body={"messages": [user_message], "stream": True},
             __metadata__={"chat_id": chat_id},
         )
     except Exception as e:  # noqa: BLE001 - Pipe呼び出し失敗の理由をそのまま通知する
@@ -253,6 +285,47 @@ def create_app(
     def index():
         return FileResponse(str(static_dir / "index.html"))
 
+    def _doc_ingest():
+        import doc_ingest  # noqa: PLC0415 - rag_memory/ 配下。RAG_MEMORY_DIRをsys.pathへ追加済み
+
+        return doc_ingest
+
+    # 11日目④: PDF/Word/Excel/PowerPointの添付をナレッジ(LanceDB)へ永続登録するHTTP経路。
+    # WebSocket(/ws)とは別立て(ファイルアップロードはHTTPの方が扱いやすいため)。
+    # static/index.html の📎ボタンから叩かれる想定。
+    @app.post("/documents")
+    async def upload_document(file: UploadFile = File(...)):
+        doc_ingest = _doc_ingest()
+        filename = file.filename or ""
+        suffix = Path(filename).suffix.lower()
+        if suffix not in doc_ingest.SUPPORTED_EXTENSIONS:
+            raise HTTPException(
+                status_code=400,
+                detail=f"未対応のファイル形式です: {suffix or '(拡張子なし)'}"
+                f"(対応: {sorted(doc_ingest.SUPPORTED_EXTENSIONS)})",
+            )
+        data = await file.read()
+        if len(data) > DOC_UPLOAD_MAX_BYTES:
+            raise HTTPException(
+                status_code=413,
+                detail=f"ファイルサイズが大きすぎます(上限{DOC_UPLOAD_MAX_BYTES // (1024 * 1024)}MB)",
+            )
+        try:
+            return doc_ingest.ingest_document(filename, data)
+        except doc_ingest.UnsupportedFileTypeError as e:
+            raise HTTPException(status_code=400, detail=str(e)) from e
+        except Exception as e:  # noqa: BLE001 - 抽出/DB登録失敗の理由をそのまま通知する
+            raise HTTPException(status_code=500, detail=f"{type(e).__name__}: {e}") from e
+
+    @app.get("/documents")
+    def list_documents_endpoint():
+        return _doc_ingest().list_documents()
+
+    @app.delete("/documents/{filename}")
+    def delete_document_endpoint(filename: str):
+        deleted = _doc_ingest().delete_document(filename)
+        return {"filename": filename, "deleted": deleted}
+
     @app.websocket("/ws")
     async def ws_endpoint(websocket: WebSocket):
         await websocket.accept()
@@ -294,10 +367,10 @@ def create_app(
             # awaitする。WebSocket送信は必ずイベントループ上で行う必要があるための橋渡し。
             pending_sends.append(coro)
 
-        async def _handle_final_transcript(text: str) -> None:
+        async def _handle_final_transcript(text: str, images: list[str] | None = None) -> None:
             await send_json({"type": "final_transcript", "text": text})
             await send_json({"type": "state", "value": "speaking"})
-            for event in run_turn(pipe, chat_id, text, synthesize=synthesize):
+            for event in run_turn(pipe, chat_id, text, synthesize=synthesize, images=images):
                 await send_json(event)
 
         stt = stt_engine_factory(on_partial, on_final, on_stt_error)
@@ -330,8 +403,19 @@ def create_app(
                         else:
                             if payload.get("type") == "text_input":
                                 user_text = (payload.get("text") or "").strip()
+                                # 11日目④-1: 送信ボタン/Enter時に画像(base64、data URL
+                                # prefix無し)が同梱されていれば受け取る。static/index.htmlの
+                                # 📷ボタンで選択した画像は、ここを通ったターンだけの
+                                # 一時的なコンテキストとして扱う(📎の文書添付のようにDBへ
+                                # 永続登録はしない)。
+                                raw_images = payload.get("images")
+                                images = (
+                                    [img for img in raw_images if isinstance(img, str) and img]
+                                    if isinstance(raw_images, list)
+                                    else None
+                                )
                                 if user_text:
-                                    await _handle_final_transcript(user_text)
+                                    await _handle_final_transcript(user_text, images)
                 while pending_sends:
                     await pending_sends.pop(0)
         except WebSocketDisconnect:

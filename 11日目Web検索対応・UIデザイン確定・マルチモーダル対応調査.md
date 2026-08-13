@@ -1,8 +1,8 @@
 ---
 project: C.L.A.I.R.E.(さぽーとAI)
 date: 2026-08-12
-tags: [Web検索, UIデザイン, マルチモーダル, 画像, PDF, エンドツーエンド遅延, 作業ログ]
-status: 進行中(①はステップ0〜6完了・実機テストでgpt-oss:20bのCUDAクラッシュとCLIベンチとの乖離を発見し継続調査中。④は現状調査まで先行実施済み。②③は未着手)
+tags: [Web検索, UIデザイン, マルチモーダル, 画像, PDF, Word, Excel, PowerPoint, エンドツーエンド遅延, 作業ログ]
+status: 進行中(①はステップ0〜6完了・実機テストでgpt-oss:20bのCUDAクラッシュとCLIベンチとの乖離を発見し継続調査中。②③は未着手。④はPDF/Word/Excel/PowerPoint対応を実装済み。④-1で画像もgemma4:26b(DEEP)がvision対応済みと実測確認、専用モデル追加は不要と判明。④-2で「画像添付時はDEEPへ強制ルーティング」を実装完了(router.py/ollama_client.py/support_ai_auto_pipe.py/voice_gateway.py/static/index.html、単体テスト205件成功)、実機確認は未実施)
 ---
 
 [[サポートAI作製計画/10日目ウェイクワード・キーボード入力対応.md|10日目]]で①③③'⑦(常時プレビュー+手動送信方式への設計変更)まで実機確認が完了し、[[サポートAI作製計画/9日目自前音声UIとストリーミング音声対話.md|9日目]]⑧「エンドツーエンド遅延の実測」が積み残しのまま残っている。11日目の今日は、①9日目⑧の遅延実測を消化しつつ、②クレアがWeb検索できるようにする、③自作UI(OpenWebUI相当の機能を備えたデザイン)の方向性を確定する、④現状のシステムがマルチモーダル(画像・PDF)に対応できているかを調査し対策を講じる、の4本立てで進める。
@@ -318,32 +318,117 @@ python ws_e2e_bench.py --audio results/stt_bench/sample01.wav --url ws://127.0.0
     > ただしこのマシンにはDocker(Docker Desktop)が未インストールであることが判明。
     > `winget install -e --id Docker.DockerDesktop`でインストール可能(WSL2バックエンド。
     > 管理者権限・インストール後の再起動が必要な場合あり)。ユーザー自身でインストール予定のため、
-    > **インストール完了・Docker起動確認まで本項目はブロック中**。完了後、以下の手順で
-    > SearXNGコンテナを起動する:
-    > ```
-    > docker run -d --name searxng -p 8888:8080 -v "${PWD}/searxng:/etc/searxng" searxng/searxng
-    > ```
-    > 起動後 `http://127.0.0.1:8888` で疎通確認し、`/etc/searxng/settings.yml`で
-    > `search.formats`に`json`を追加する(既定はHTML出力のみでAPIとして叩けないため。
-    > SearXNGの既知の設定要件)。
+    > **インストール完了・Docker起動確認まで本項目はブロック中**。
+  - > [!warning] 2026-08-13追記: **Docker導入を断念し、SearXNGをDockerなし(ネイティブ)で
+    > 動かす方式に方針変更**。原因は以下の通り:
+    > 1. `winget install -e --id Docker.DockerDesktop`が失敗。原因調査の結果、Windows 11 Home
+    >    エディションでは**Hyper-Vバックエンドが使えず、Docker DesktopはWSL2必須**と判明
+    > 2. 以前から`wsl --install`を管理者PowerShellで実行しても**14.6%で進行が止まる**現象が
+    >    未解決のまま残っており(BIOS側の仮想化支援機能(VT-x)有効化や
+    >    `Microsoft-Windows-Subsystem-Linux`/`VirtualMachinePlatform`機能の個別有効化、
+    >    `wsl --update`等を試したが今回は深追いせず)、WSL2復旧を待たずに進める方針とした
+    > 3. SearXNG自体はPython(Flask)製アプリであり、公式のuwsgi+systemd前提の手順を使わず
+    >    **Flask組み込みの開発用サーバー(`python searx/webapp.py`)で直接起動する**方式なら
+    >    Docker/WSL2どちらも不要と判断した(個人・単一PC用途のため実用上問題なし)
 - [ ] 選定したバックエンドを叩く`web_search.py`(新規)を書く:クエリ→検索結果(タイトル・URL・スニペット)を返す部品として、既存の`memory_store.py`の検索I/Fに寄せた形にする
+  - > [!note] 2026-08-13時点: 未着手。SearXNG本体のネイティブ起動(下記実施手順)を先に完了させてから着手する
 - [ ] ルーターに**「Web検索が必要か」の判定**を追加する(現状の「検索」というFASTラベルを、a) RAG記憶検索で足りる、b) Web検索が要る、に細分化する)
 - [ ] 検索結果をLLMのプロンプトに**RAGのcontextと同じ枠組みで**注入する(`format_context()`の拡張、または別関数として新設)
 - [ ] 7日目⑤で残課題になっている「検索結果のハルシネーション対策」(直接引用を促す指示文強化)を、Web検索結果にも同様に適用する
 - [ ] 音声UI(`voice_gateway.py`)経由でも動くことを確認する(検索中は`state: thinking`が伸びるため、UIの「考え中」表示が長時間化しても不自然にならないか確認する)
 - [ ] 外出時のCODEルート方針(9日目⑦で保留中)と同様、**Web検索を無制限に許可してよいか**(意図しない個人情報の送信・レイテンシ増)を軽く整理しておく
 
-### 実施手順(予定)
+### 実施手順(2026-08-13: Dockerなしネイティブ実行版に更新)
 
-(バックエンド選定後に確定する。SearXNGを選ぶ場合はDocker起動コマンド、APIを選ぶ場合はAPIキー取得・環境変数設定の手順をここに書く)
+ヴォールト外の別ディレクトリ(`C:\Users\gakuh\dev\searxng`)にSearXNG本体をクローンし、`.venv`上でFlask組み込みサーバーとして起動する。ヴォールト(`サポートAI作製計画/scripts/`)には置かない(SearXNG本体は数百ファイルの別リポジトリのため)。`web_search.py`からは`http://127.0.0.1:8888`宛にHTTPで叩くだけなので、どこで動いていても影響しない。
+
+- [x] **手順1: クローン**
+  ```powershell
+  mkdir C:\Users\gakuh\dev
+  cd C:\Users\gakuh\dev
+  git clone https://github.com/searxng/searxng.git
+  cd searxng
+  ```
+  > [!warning] 2026-08-13にハマった点: クローン直後、`pip install -e .`が
+  > 「'setup.py'/'pyproject.toml'が無い」で失敗。さらに調査すると、リポジトリ内に
+  > **コロン(`:`)を含むファイル名**(`utils/templates/etc/httpd/sites-available/searxng.conf:socket`等、
+  > Linuxのsystemdソケットユニット向けファイル4つ)があり、**NTFS(Windows)はファイル名に
+  > コロンを使えない**ためクローンが不完全になっていた(working treeに`.git`と`.venv`しか
+  > 残らず、他の全ファイルがgit上「削除」としてステージングされた状態になっていた)。
+  > `git restore --staged .` → `git restore .` で大半のファイルは復元できたが、上記4ファイルは
+  > `git rm --cached`しても「pathspec did not match」となった(既にindexから外れていたため
+  > 実質無害)。この4ファイルはLinux専用の設定テンプレートで**Windowsネイティブ実行には不要**
+  > なため、無いまま進めることにした。
+- [x] **手順2: 仮想環境作成・依存インストール**
+  ```powershell
+  python -m venv .venv
+  .\.venv\Scripts\Activate.ps1
+  python -m pip install -U pip setuptools wheel pyyaml
+  pip install -r requirements.txt
+  ```
+  > [!note] `pip install -e .`ではなく`pip install -r requirements.txt`が正しいコマンド
+  > (SearXNGはpipパッケージ化された配布形態を取っていないため)。
+- [x] **手順3: 設定ファイル準備**
+  ```powershell
+  mkdir C:\Users\gakuh\dev\searxng-instance
+  copy searx\settings.yml C:\Users\gakuh\dev\searxng-instance\settings.yml
+  ```
+  - [x] `secret_key`をランダム値に変更(`python -c "import secrets; print(secrets.token_hex(32))"`の出力を貼る。空だと起動拒否される)
+  - [x] `search.formats`に`json`を追加(既定はhtmlのみでAPIとして叩けないため)
+  - [x] `server.port`が`8888`になっているか確認 → 2026-08-13確認: 既定のまま`8888`になっていたため変更不要だった
+- [x] **手順4: 起動・疎通確認**
+  ```powershell
+  cd C:\Users\gakuh\dev\searxng
+  .\.venv\Scripts\Activate.ps1
+  $env:SEARXNG_SETTINGS_PATH = "C:\Users\gakuh\dev\searxng-instance\settings.yml"
+  python -m searx.webapp
+  ```
+  別ターミナルで `curl "http://127.0.0.1:8888/search?q=test&format=json"` がJSONを返せば成功。初回はWindows Defenderファイアウォールの許可(プライベートネットワーク)が出る。
+  > [!warning] 2026-08-13にハマった点①: `python searx\webapp.py`(スクリプト直接実行)は`ModuleNotFoundError: No module named 'searx'`で失敗する
+  > スクリプトを直接実行すると、Pythonは**スクリプト自身のディレクトリ**(`searx\`)を`sys.path[0]`に追加し、リポジトリルートは追加しない。そのため`webapp.py`内の`import searx`系のimportが解決できない。
+  > **対策**: リポジトリルート(`C:\Users\gakuh\dev\searxng`)から`python -m searx.webapp`と**モジュールとして**実行する(上記コマンドは修正済み)。こうするとカレントディレクトリがpathに入り解決する。
+  > [!warning] 2026-08-13にハマった点②: 上記対策後も`ModuleNotFoundError: No module named 'pwd'`で失敗した
+  > `pwd`はUnix専用の標準ライブラリでWindowsには存在しない(pipでの追加インストールも不可)。SearXNG本体はLinux/macOS実行が前提のため、`searx/valkeydb.py`が(Valkey/Redis接続失敗時のログ出力用に)`import pwd`をトップレベルで無条件に書いており、`webapp.py`→`limiter.py`→`valkeydb.py`のimportチェーンで即座に落ちていた。Docker断念とは無関係の**Windowsネイティブ実行特有の非互換バグ**。
+  > **対策**: `C:\Users\gakuh\dev\searxng\searx\valkeydb.py`を直接パッチした。
+  > - `import pwd`を`try/except ImportError`で囲み、Windowsでは`pwd = None`にフォールバック
+  > - `except`節内の`pwd.getpwuid(...)`を使ったログ出力を`pwd is not None`でガードし、Windowsでは簡略化したログメッセージに差し替え
+  > この修正で`python -m searx.webapp`が起動に成功し、`curl "http://127.0.0.1:8888/search?q=test&format=json"`がHTTP 200・JSON(Wikipedia等の検索結果)を返すことを確認した。
+  > なお起動時に`ahmia`/`bilibili`/`wikidata`/`torch`エンジンの読み込みエラーが出るが、`tzdata`パッケージ不足やWikidata側のHTTP 403など**個別エンジン固有の軽微な問題**で、SearXNG全体の起動やWeb検索自体には影響しない(気になる場合は`pip install tzdata`で`bilibili`のエラーは解消できる)。
+  > [!warning] 2026-08-13にハマった点③: ブラウザで開くとCSS/JSが当たらず、SearXNGロゴのSVGだけが画面いっぱいに表示される
+  > DevToolsのNetworkタブで確認したところ、`sxng-core.min.js`・`sxng-ltr.min.css`・`favicon.svg`が**404**になっていた。
+  > 原因は`searx/webutils.py`の`get_static_file_list()`が`pathlib.Path.relative_to()`の結果をそのまま
+  > `str()`化しており、**Windows上ではこれがバックスラッシュ区切り**(`themes\simple\sxng-core.min.js`)になる点。
+  > 一方`webapp.py`の`custom_url_for()`はテーマファイルの照合を`f"themes/{theme_name}/{arg_filename}"`と
+  > **スラッシュ区切りの文字列**で行っているため、Windows上ではこの2つが一致せず、
+  > 実在しない`/static/sxng-core.min.js`(themes/simpleのプレフィックス無し)がHTMLに出力されて404になっていた。
+  > `:`ファイル名問題・`pwd`モジュール問題に続く**3つ目のWindowsネイティブ実行特有の非互換バグ**。
+  > **対策**: `searx/webutils.py`の`get_static_file_list()`内で、相対パスを`.replace(os.sep, '/')`して
+  > フォワードスラッシュに正規化するようパッチした。再起動して確認したところCSS/JSは200で読み込まれ、
+  > 画面は正常化した(検証済み)。
+  > [!warning] 2026-08-13にハマった点④: 画面は直ったが、検索を実行すると500 Internal Server Error
+  > `curl ...&format=json`ではSearXNGのエンジン自体(google cse/duckduckgo等)は正常に結果を返しており、
+  > **検索バックエンド自体は機能していた**。問題はHTML表示(`theme=simple`)側のみで発生。
+  > `debug: true`に一時変更してトレースバックを確認したところ、`jinja2.exceptions.TemplateNotFound:
+  > result_templates/default.html`が原因と判明。`searx/webutils.py`の`get_result_templates()`にも
+  > `get_static_file_list()`と**同じ系統のWindowsパス区切り文字バグ**があり(`os.path.join()`の結果が
+  > バックスラッシュ区切りになるため、`webapp.py`の`get_result_template()`がスラッシュ区切りで行う
+  > 照合に失敗し、テーマ名prefix無しの誤ったテンプレートパスにフォールバックしていた)、同様に
+  > `.replace(os.sep, '/')`でパッチして解決した(検証済み: `curl`で検索結果ページが200・ページネーション
+  > まで含めて正常描画されることを確認)。`debug`設定はテスト後`false`に戻し、検証用に一時起動した
+  > プロセスは停止済み。**次にターミナルで`python -m searx.webapp`を起動し直せば通常運用に戻る**。
+- [x] **手順5: 常駐運用の検討**
+-　現状はOllama/VOICEVOXと同様、起動用ターミナルを立てっぱなしにする運用で当面回す。将来的にはnssm等でのWindowsサービス化も検討)
 
 ### 結果 / 分析 / 改善策
 
-(実行後に記入)
+(手順3〜5の実行後に記入)
 
 ### 残課題
 
-(実行後に記入)
+- `web_search.py`の実装に着手する(手順4の疎通確認は完了したので着手可能)
+- WSL2の`wsl --install`が14.6%で止まる問題自体は未解決のまま(今回はDocker断念により回避しただけ)。将来Docker Desktopが必要になった場合はBIOSの仮想化支援機能(VT-x/AMD-V)有効化から見直す必要がある
+- `searx/valkeydb.py`へのpwdモジュールパッチ、および`searx/webutils.py`への静的ファイルパス区切り文字パッチはいずれもリポジトリ本体への直接編集(git管理下のファイル)。`git pull`等でSearXNG本体を更新すると**上書きで消える可能性がある**ため、更新時は再適用が必要なことに注意
+- `searx/webutils.py`への2箇所のパッチ(`get_static_file_list()`・`get_result_templates()`)は検証済み。次回`git pull`等でSearXNG本体を更新する際は再適用が必要な点に注意(`valkeydb.py`のpwdパッチと合わせて計3箇所)
 
 ---
 
@@ -355,7 +440,7 @@ python ws_e2e_bench.py --audio results/stt_bench/sample01.wav --url ws://127.0.0
 
 ### 作業内容
 
-- [ ] [[サポートAI作製計画/UIデザイン提案.html]]を実際にブラウザで開いて表示確認する(スクリーンショット済みの[[サポートAI作製計画/UIデザイン.png]]と差分がないか)
+- [x] [[サポートAI作製計画/UIデザイン提案.html]]を実際にブラウザで開いて表示確認する(スクリーンショット済みの[[サポートAI作製計画/UIデザイン.png]]と差分がないか)
 - [ ] OpenWebUIが持つ機能を棚卸しし、**自作UIに必須/あれば良い/不要**に仕分けする(例:チャット履歴一覧、複数チャットの切り替え、モデル選択、Valve設定GUI、ファイル添付、Markdown/コードブロックのシンタックスハイライト、会話のエクスポート等)
 - [ ] 音声対話(9〜10日目で実装済みのリアルタイム性重視のHUD的UI)と、テキスト中心の従来型チャットUI(OpenWebUI的な左サイドバー+中央チャットlog)を**同じ画面に同居させるか、モード切り替えにするか**を決める
 - [ ] `UIデザイン提案.html`のARC CORE(同心円リング)やスキャンライン背景といった装飾要素が、**長時間の実用(日常的にテキストで使う場面)でも邪魔にならないか**を検討する(装飾を弱めたテキスト作業モードを別途用意するか等)
@@ -368,11 +453,90 @@ python ws_e2e_bench.py --audio results/stt_bench/sample01.wav --url ws://127.0.0
 
 ### 結果 / 分析 / 改善策
 
-(実行後に記入)
+2026-08-13、自分の考え(ファイル添付ボタンはマイクボタンの左隣に追加する/チャット履歴にリネーム・削除ボタンが無いので後で足す)を踏まえて、[[サポートAI作製計画/UIデザイン提案.html]](ver1)を再分析し、次の3つの表を作成した上で[[サポートAI作製計画/UIデザイン提案ver2.html]](新規)を作成した。
+
+#### 表1: OpenWebUIの必要項目の棚卸し
+
+| 分類 | 項目 | 内容 |
+|---|---|---|
+| サイドバー | 新規チャット | 新しい会話セッションを開始するボタン |
+| サイドバー | チャット履歴一覧(日付グループ化) | Today/Yesterday等でグループ化された会話リスト |
+| サイドバー | 履歴の検索 | タイトル・本文から会話を絞り込む検索欄 |
+| サイドバー | 履歴のリネーム | 各履歴アイテムの名前をインライン編集する✎ボタン |
+| サイドバー | 履歴の削除 | 各履歴アイテムを削除する🗑ボタン |
+| サイドバー | ピン留め/アーカイブ | 使う履歴を固定表示/使わない履歴を隠す |
+| トップバー | モデル選択(切替可能) | ドロップダウンで使用モデルをその場で切り替え |
+| トップバー | 設定/Valve GUI | Pipeのパラメータ等をGUIで変更 |
+| トップバー | ユーザーメニュー | アカウント設定・サインアウト |
+| チャット領域 | メッセージ吹き出し(ユーザー/AI) | 発話者ごとに視覚的に区別された会話ログ |
+| チャット領域 | Markdown/コードブロック表示 | シンタックスハイライト+コピー ボタン |
+| チャット領域 | 引用元(出典)表示 | RAG検索やWeb検索でヒットしたソースの明示 |
+| チャット領域 | メッセージ操作 | コピー/再生成/編集/評価(いいね・よくない) |
+| 入力欄 | マルチライン入力 | 長文入力に対応するテキストエリア |
+| 入力欄 | ファイル添付(画像/PDF等) | ドラッグ&ドロップ or ボタンでのアップロード |
+| 入力欄 | 音声入力 | マイクボタンでの発話入力 |
+| 入力欄 | Web検索トグル | その発話でWeb検索を使うかのON/OFF |
+| その他 | ナレッジベース(RAGドキュメント)管理 | 取り込んだノート/文書の一覧・管理 |
+| その他 | チャットのエクスポート/共有 | 会話をファイル出力/リンク共有 |
+| その他 | テーマ切替・通知 | ライト/ダーク切替、トースト通知 |
+
+#### 表2: 参考文献のJARVIS開発動画の分析
+
+参考文献に挙げた2本の動画(いずれも「Claude Codeで自分だけのJARVISを作る」系のAIアシスタントHUD開発企画。タイトルは`I Built My Own JARVIS with Claude Code (100% FREE)`/`I Built JARVIS from Iron Man with Claude Fable 5 (INSANE Results!)`)は、YouTube側の制限で本文からの自動書き起こし取得はできなかった(`WebFetch`ではフッターのみ返り、字幕・本文は抽出不可)。そのため、ver1作成時に実際に動画を見て抽出済みだった意匠(ver1冒頭コメント参照)を、Iron Man作品由来のJARVIS HUDの一般的な構成要素と突き合わせて再整理した。
+
+| 要素 | 内容 |
+|---|---|
+| 配色 | 深いネイビー/黒背景+シアン発光アクセント(ハイコントラストな"機械の眼"感) |
+| 中枢ビジュアル | 同心円リングの「ARC CORE」。発話に反応する波形/音声レベル表示を中心に配置 |
+| 背景装飾 | スキャンライン/グリッドテクスチャ+放射状グロー(奥行きのあるHUD感) |
+| フレーム | 四隅のコーナーブラケット(L字)でHUDの枠を可視化 |
+| タイポグラフィ | モノスペース/近未来ディスプレイフォント(Orbitron等)、広いトラッキングの大文字ラベル |
+| テレメトリ表示 | 遅延(ms)・tok/s・VRAM・稼働時間などのライブ数値を常時表示 |
+| ステータス表示 | 発光ドット付きピル型バッジ(LISTENING/VAD ACTIVE等) |
+| 音声操作 | 中央の大型丸型マイクボタン(Push-to-talk) |
+| ログ表示 | ターミナル風の逐次イベントログ(タイムスタンプ付き) |
+| パイプライン可視化 | STT→ルーター→LLM→TTSの各段階をメーターで表示 |
+
+#### 表3: 自作UI(ver1)に足りない項目(表1・表2の差分+自分の考え)
+
+| 分類 | 項目 | ver1の状態 | ver2での対応 |
+|---|---|---|---|
+| マルチモーダル | ファイル添付ボタン | 無し | マイクボタンの左隣にクリップアイコンのボタンを追加(自分の考え通りの配置) |
+| マルチモーダル | 添付ファイルのプレビュー | 無し | 入力欄の上に添付済みファイルのチップ(サムネイル・ファイル名・削除ボタン)を表示 |
+| チャット履歴管理 | リネーム | 無し | hover時に✎ボタンを表示、インライン編集に切り替え |
+| チャット履歴管理 | 削除 | 無し | hover時に🗑ボタンを表示 |
+| チャット履歴管理 | 検索 | 無し | サイドバー上部に検索入力を追加 |
+| テキストチャットログ | メッセージ吹き出し表示 | 無し(ARC CORE中心のHUDのみで会話ログが見えない) | ARC COREを上部の小型ヘッダに縮小し、下に音声/テキスト共通のスクロール可能なメッセージログを追加(③の「音声HUDとテキストUIを同居させるか」の論点への回答=同居させる) |
+| テキストチャットログ | Markdownコードブロック | 無し | コードブロック+言語表示+コピー ボタンを追加 |
+| RAG/Web検索 | 引用元(出典)表示 | 無し | メッセージ下にObsidianノート/Web検索結果の出典チップを追加 |
+| RAG/Web検索 | 検索中インジケータ | 無し | 「Web検索中…」のドットアニメーション付き表示を追加(②の「考え中表示が長時間化しても不自然にならないか」への対応) |
+| モデル選択 | 切替可能なドロップダウン | 静的表示のみ | `<details>`によるドロップダウンでその場でモデル切替できるUIに変更 |
+| メッセージ操作 | コピー/再生成/編集/評価 | 無し | 各メッセージにhoverで表示されるアクションアイコン行を追加 |
+| Web検索 | ON/OFFトグル | 無し(②実装前のため未対応だった) | 下部パッドにピル型トグル、右パネルのControlsにスイッチを追加 |
 
 ### 残課題
 
-(実行後に記入)
+- ver2はモックアップ(静的HTML)のため、`static/index.html`(実装)への段階反映が未着手。まず①ファイル添付ボタン(受け口はまだ`voice_gateway.py`に無い。④の残課題と連動)、②チャット履歴のリネーム/削除(現状は履歴の永続化自体が未実装の可能性があるため、先に履歴の保存先を確認する)の2点から着手するのが優先度高
+- チャット履歴のリネーム/削除を機能させるには、履歴データの保存形式(ファイル名変更で足りるのか、DB/JSON側の更新も要るのか)を先に調査する必要がある
+- Web検索ON/OFFトグルの実装は②(Web検索対応)の`web_search.py`実装後に接続する
+- 引用元(出典)チップは、RAGの`format_context()`拡張(②の作業内容)が返すソース情報をUI側にどう渡すか(APIレスポンスの形式設計)を別途詰める必要がある
+
+#### 追記(2026-08-13): 読み上げ速度調整バーの追加
+
+上記の表3作成・ver2作成後、追加で「読み上げ速度を変えられるバーを右側のどこかに置きたい」との要望を受けた。これも表1(OpenWebUIには無い独自要望だが、TTSを自前運用しているC.L.A.I.R.E.には必要な項目)・表3の不足項目に相当するため、**[[サポートAI作製計画/UIデザイン提案ver2.html]]の右パネル「// Controls」内**(思考モードスイッチの直下)に追加した。
+
+| 項目 | 内容 |
+|---|---|
+| 配置 | 右パネル Controls セクション最下部(ウェイクワード/自動送信/RAG/Web検索/思考モードのスイッチ群の下) |
+| UI | ラベル+現在値表示(例: `1.0x`)+スライダー(0.5x〜2.0x、0.1刻み)+プリセットの目盛りクリック(0.5/0.75/1.0/1.5/2.0) |
+| 見た目 | シアンのグラデーショントラック+発光する丸型つまみで、既存のJARVIS HUDの配色・トークンをそのまま踏襲 |
+| 実装時の接続先(未着手) | `voice_gateway.py`経由でTTS(VOICEVOX)呼び出し時の`speedScale`パラメータへ反映する想定。値の送信タイミング(スライダー操作のたびに送るか、次回発話から反映か)は未検討 |
+
+##### 残課題(追記分)
+
+- VOICEVOXの`speedScale`は実際何倍まで許容されるか(0.5〜2.0の範囲設定がVOICEVOX側の実用域と合っているか)を`tts_latency_bench.py`等で確認する
+- スライダーの値をどこに保存するか(セッションごとか、ユーザー設定として永続化するか)を決める
+- 音声UI(`voice_gateway.py`)側に速度パラメータを受け取るWSメッセージ種別がまだ無いため、②③④の実装と合わせて追加する
 
 ---
 
@@ -387,7 +551,7 @@ python ws_e2e_bench.py --audio results/stt_bench/sample01.wav --url ws://127.0.0
 - [x] `voice_gateway.py`にimage/base64/PDF等の受信処理があるか確認する
 - [x] `ollama_client.py`にvision系(画像をプロンプトに含める)実装があるか確認する
 - [x] `support_ai_auto_pipe.py`が画像添付をどう扱っているか確認する
-- [ ] 対策(下記改善策)の実装
+- [x] 対策(下記改善策)の実装(2026-08-13: PDF/Word/Excel/PowerPointのみ。画像は④-1参照で未着手)
 
 ### 結果
 
@@ -417,12 +581,223 @@ python ws_e2e_bench.py --audio results/stt_bench/sample01.wav --url ws://127.0.0
   4. `static/index.html`・`voice_gateway.py`に画像アップロード(ドラッグ&ドロップ or ファイル選択)のUIと受信処理を追加する(③のUIデザイン確定時にレイアウトへ組み込む)
 - **OpenWebUI経由の運用を当面併用する**という選択肢も残す。自前UIでのマルチモーダル対応が整うまでは、画像やPDFを使いたい場面だけOpenWebUI(8080)を使う運用にすれば、開発中でも実用上の穴を埋められる。
 
+> [!note] 2026-08-13追記: PDF/Word/Excel/PowerPoint対応を実装済み(画像は未着手・下記④-1参照)
+> 「まずは実装コストの低いPDF/Word/Excel/PowerPointから対応する」方針のもと、上記改善策の
+> PDF対応の範囲をOffice系3形式(Word/Excel/PowerPoint)にも広げる形で実装した。
+>
+> - **`scripts/rag_memory/doc_ingest.py`(新規)**: PDF(`pdfplumber`)/Word(`python-docx`)/
+>   Excel(`openpyxl`)/PowerPoint(`python-pptx`)からテキストを抽出し、`chunker.chunk_markdown()`で
+>   チャンク化 → `memory_store`経由でLanceDBへ**永続登録**する(「その場でプロンプト注入」ではなく
+>   「RAGへ永続登録」を採用。ユーザーとの相談で、OpenWebUI/Claudeの「プロジェクト機能」相当の
+>   ナレッジ化として扱うことに決めた)。`source="doc:<ファイル名>"` / `role="document"` /
+>   `route="DOCUMENT"`で登録し、`ingest_notes.py`と同じ「削除してから追加」upsert方式のため、
+>   同名ファイルの再アップロードは上書きになる。
+> - **`support_ai_auto_pipe.py`**: CODEルートのrecall絞り込みを`route=("CODE", "NOTE")`から
+>   `route=("CODE", "NOTE", "DOCUMENT")`に拡張(FAST/DEEPは元々`route=None`でフィルタ無しのため
+>   変更不要。7日目⑤で見つかった「NOTEを除外すると設計ノートがヒットしなくなる」問題と同種の
+>   衝突を、DOCUMENTでも先回りして防いだ)。
+> - **`voice_gateway.py`**: `POST /documents`(アップロード→抽出→登録、20MB上限あり)・
+>   `GET /documents`(一覧)・`DELETE /documents/{filename}`(削除)の3エンドポイントを追加。
+>   WebSocket(`/ws`)とは独立したHTTP経路(ファイルアップロードはWSより素直に書けるため)。
+> - **`static/index.html`**: テキスト入力欄の左に📎添付ボタンを追加(ver2デザイン案どおり
+>   マイクボタン付近に配置)。アップロード成功時は「[ナレッジ登録] filename(Nチャンク)」を
+>   ログに表示し、チップにも状態を出す。ヘッダーに📚ボタンを追加し、簡易一覧パネル
+>   (ファイル名・チャンク数・登録日時・削除ボタン)をユーザーとの相談どおり実装した。
+> - 依存関係: `pdfplumber` `python-docx` `openpyxl` `python-pptx` `python-multipart`を
+>   このマシンへ追加インストール済み(このプロジェクトはvenvを切らず素のPython 3.12環境を
+>   使っているため、リポジトリ側にrequirements.txt等の記録は無い。②のSearXNG用venvとは別)。
+> - テスト: `tests/test_doc_ingest.py`(拡張子ディスパッチ+Word/Excel/PowerPointは実ライブラリで
+>   書いて読む往復テスト。PDFは書き込み用ライブラリ(reportlab等)を追加するコストを避け、
+>   ディスパッチのみモックで確認し実際の読み取りは手動確認とした)、
+>   `tests/test_voice_gateway.py`に`/documents`系3エンドポイントのFastAPI TestClientテストを追加。
+>   `tests/test_support_ai_auto_pipe_memory.py`の期待値も`("CODE", "NOTE", "DOCUMENT")`へ更新。
+>   全191件(既存180件+新規11件)が成功。
+
 ### 残課題
 
-- vision対応モデルの選定とVRAM同居可否の実測(未着手)
-- PDF取り込みの実装(未着手)
-- 画像アップロードUIの実装(③のUIデザイン確定を待つ)
+- vision対応モデルの選定とVRAM同居可否の実測(未着手。下記④-1「画像対応の検討事項」参照)
+- ~~PDF取り込みの実装~~ → 2026-08-13実装済み(Word/Excel/PowerPointも合わせて対応。上記追記参照)
+- 画像アップロードUIの実装(③のUIデザイン確定を待つ。④-1の方針確定後に着手)
 - OpenWebUI経由でのマルチモーダル動作が実際にPipeを経由していたのか、Open WebUI標準チャット経由だったのかの最終確認(分析②の裏付け)
+- PDF実抽出(`_extract_pdf`)の実機確認がまだ自動テスト化されていない(手動でのアップロード確認が必要)
+- 大きめのPDF/Excel(数百ページ・数万行)での埋め込み所要時間・チャンク数の実測(20MB上限は決めたが、時間面の上限は未検証)
+- ナレッジ一覧パネルはファイル名・チャンク数・削除のみの簡易版。検索・並び替え等は今回スコープ外(YAGNI。必要になったら追加)
+
+---
+
+## ④-1 画像対応の検討事項(2026-08-13追記: 実装は未着手・検討のみ)
+
+### 背景/目的
+
+④の改善策では「画像対応にはvision対応モデルの追加ダウンロードが要る」という前提で書いたが、
+ユーザーから「本当に追加インストールが必要か? `gemma3`にvision対応版があるなら、今使っている
+`gemma4`系のモデル(ルーター`gemma4-e4b-cpu`・DEEP`gemma4:26b`)でも画像を読めるのではないか」
+という指摘があった。これは「新しいモデルを追加でロードせず、既存モデルの入力にimagesを足すだけで
+済むかもしれない」という、VRAM(結果1で残り約450MiBしかないと判明済み)の制約上とても重要な論点
+のため、実装に入る前にこのノートへ検討事項として整理しておく(**このセクションは調査結果ではなく
+「何を確認すべきか」の設計メモ**。実際にOllama側で確認するのは次回作業)。
+
+### 確認すべきこと(未実施)
+
+1. **`gemma4-e4b-cpu`(ルーター用)・`gemma4:26b`(DEEP用)が実際にvision(画像入力)対応の
+   チェックポイントかどうか。** Ollamaの`/api/show`(または`ollama show <model>`)には
+   `capabilities`フィールドがあり、`["completion", "vision", ...]`のように対応能力が
+   列挙される。ここに`vision`が含まれているかを見れば、追加ダウンロード無しで画像を
+   渡せるかが機械的に判定できる。`gemma3`系(4b/12b/27b)がマルチモーダル単一チェックポイントで
+   配布されているのと同じ構造を`gemma4`系も引き継いでいれば、**コード変更(`ollama_client.py`に
+   `images`引数を足すだけ)で対応でき、モデルの追加ダウンロードは不要**になる可能性が高い。
+2. **ルーター(`gemma4-e4b-cpu`)とDEEP(`gemma4:26b`)のどちらへ画像を渡すべきか。**
+   仮に両方ともvision対応だとしても、①-1の分析で判明したとおりルーターはCPU固定であり、
+   テキストだけの判定でも`seg_router`が数秒〜26秒とばらつく状態(残課題「FASTルートの
+   `seg_router`がなぜ26秒級とばらつくのか」参照)。画像はテキストよりトークン化コストが重く、
+   CPU推論では明らかに不利なため、**画像を扱うなら(GPU上で動く)DEEP側に寄せるほうが現実的**。
+   ルーター側で画像の有無だけを見て「画像添付あり→強制的にDEEPへ」という分岐にすれば、
+   ルーター自体に画像を読ませる必要はなくなる(添付ファイル種別だけを見る軽い判定で済む)。
+3. **vision対応であっても、画像トークン処理でVRAM使用量が増えないか。** 結果1でVRAM残りが
+   約450MiBしかないことが判明済み。モデルの重み自体は変わらなくても、画像を埋め込む際の
+   中間テンソル(vision encoder出力)がVRAMを追加消費する可能性があるため、実際に画像付き
+   リクエストを1回投げてVRAMピークを`nvidia-smi`で確認する必要がある。
+4. **もし`gemma4`系がvision非対応だった場合の代替案の優先順位。**
+   - 案A: 改善策どおり専用vision対応モデル(`qwen2.5vl`、`llama3.2-vision`等)を追加導入する
+     (VRAM圧迫のリスクが最も高い。残り約450MiBでは小型モデルでも同時常駐は厳しい可能性)
+   - 案B: DEEPモデル(`gemma4:26b`)を、vision対応版が存在するなら**同サイズ帯のvision版へ
+     置き換える**(新規追加ではなく置き換えなのでVRAM純増を避けられる可能性がある)
+   - 案C: 画像そのものをLLMに読ませず、**OCR(文字認識)だけ**で対応する(`pytesseract`等)。
+     スクリーンショットやスキャン文書のような「文字が主体の画像」であれば、PDFと同じ
+     テキスト抽出→ナレッジ登録の経路にそのまま乗せられ、vision対応モデルなしで実装コストを
+     大幅に下げられる。ただし写真・図表・グラフの内容理解はできない(用途が限定される)
+
+### 論点整理(まだ結論は出していない)
+
+- 「本当に追加インストールが要るか」への一次的な答えは、**`ollama show gemma4:26b`と
+  `ollama show gemma4-e4b-cpu`の`capabilities`を見れば数分で判明する**。次回はまずここから
+  着手するのが最も費用対効果が高い(結論を推測で進めず、実際に確認してから設計する)
+- vision対応だったとしても、①で判明したCLIベンチと実機の乖離・gpt-oss:20bのCUDAクラッシュ問題が
+  未解決のままなので、**①の安定化を優先し、画像対応はその後に着手する**方針は維持する
+  (VRAM残り約450MiBという逼迫した状態で新しいモデル呼び出しパスを増やすと、不具合の切り分けが
+  さらに難しくなるため)
+- 案C(OCRのみ)は「vision対応モデルの有無によらず低コストで実装できる」という点で、
+  vision対応モデルの選定・導入が長引く場合の**暫定的な最小対応**として検討する価値がある
+
+### 残課題
+
+- ~~`ollama show gemma4:26b` / `ollama show gemma4-e4b-cpu`で`capabilities`に`vision`が~~
+  ~~含まれるか確認する~~ → 2026-08-14確認済み(下記「結果」参照。両モデルともvision対応)
+- ~~vision対応と判明した場合、画像1枚を実際に渡してVRAMピークと応答内容の妥当性を確認する~~
+  → 2026-08-14実施済み(下記「結果」参照)
+- 上記の結論が出たので、④の改善策(画像対応)を本節の結論に沿って書き直す(次回着手)
+- ルーター(`gemma4-e4b-cpu`)へ画像を渡すのは精度・速度の両面で不利と判明したため、
+  「画像添付あり→強制的にDEEPへ」という分岐(④改善策の案3)を実装する
+- `ollama_client.generate_stream()`はまだ`images`引数に対応していない(今回は`generate()`のみ
+  拡張した。DEEPルートは通常ストリーミング応答のため、画像対応を本実装する際は
+  `generate_stream()`側にも同様の拡張が必要になる)
+- テスト画像1枚・N=1の単発計測にとどまる。実運用に近い画像(写真・スクリーンショット等)での
+  再現性確認、複数回計測での安定性確認はまだ行っていない
+
+### 結果(2026-08-14: `ollama show`確認 + `vision_bench.py`による実測)
+
+**`capabilities`確認**(`curl http://127.0.0.1:11434/api/show -d '{"model":"..."}'`)
+
+| モデル | capabilities |
+|---|---|
+| `gemma4-e4b-cpu`(ルーター) | `["completion", "vision", "audio", "tools", "thinking"]` |
+| `gemma4:26b`(DEEP) | `["completion", "vision", "tools", "thinking"]` |
+
+ユーザーの指摘どおり、**両モデルとも追加ダウンロード無しでvision対応済み**であることを確認した
+(`ollama list`/`/api/tags`のcapabilities表示は古いキャッシュを返すことがあり、`vision`が
+含まれていなかった。実際に判定に使うべきは`/api/show`(`ollama show <model>`)の値)。
+
+**画像実測**(`vision_bench.py --models "gemma4-e4b-cpu,gemma4:26b" --image <テスト画像>`。
+テスト画像はPillowで生成した「白背景・左上に『TEST BOX』と書かれた青い四角・中央に黒縁の赤い楕円」の
+合成画像。結果ファイル: `results/vision_bench/vision_bench_20260814_000811.md`)
+
+| モデル | 所要時間(秒) | VRAM前(MiB) | VRAMピーク(MiB) | VRAM後(MiB) | 応答の妥当性(目視) |
+|---|---|---|---|---|---|
+| `gemma4-e4b-cpu`(ルーター・CPU固定) | 66.97 | 2616 | 2620 | 2600 | **NG**。「抽象的な煙のようなテクスチャの背景画像」と、画像に実在しない内容を答えた(ハルシネーション) |
+| `gemma4:26b`(DEEP) | 39.83 | 2600 | 15705 | 15690 | **OK**。「青い長方形のボックス(『TEST BOX』の文字入り)」「赤い楕円(黒縁)」「明るいグレーの背景」を正確に説明 |
+
+### 分析
+
+1. **DEEP(`gemma4:26b`)は画像対応として実用に足る精度がある。** テスト画像に含まれる3要素
+   (青い箱・テキスト・赤い楕円・背景色)をすべて正確に言語化できており、④改善策で挙げていた
+   「専用vision対応モデルの追加導入」は不要という結論になった。
+2. **ルーター(`gemma4-e4b-cpu`)へ画像を渡すのは精度・速度の両面で不利。** capabilities上は
+   visionに対応しているにもかかわらず、実際の応答は画像の内容と無関係な文章(ハルシネーション)
+   だった。加えて67秒とDEEP(40秒)の1.7倍近く遅い。①-1で判明した「ルーターはCPU固定で
+   テキストのみの判定でも数秒〜26秒とばらつく」という既知の弱点が、画像入力(テキストより
+   トークン化コストが重い)でさらに悪化したものと考えられる。**④-1で立てた仮説
+   (「画像はルーターではなくDEEPに寄せるべき」)が実測でも裏付けられた**。
+3. **VRAMは懸念どおり逼迫する。** `gemma4:26b`単体呼び出しでVRAMピーク15705MiB(総量16303MiBに
+   対し残り約600MiB)となり、結果1で判明していた「通常運用でピーク15843MiB・残り約450MiB」と
+   ほぼ同水準まで逼迫することを確認した。他のモデル(FAST/CODE)と同時にVRAMを取り合う実運用
+   シナリオでは、この計測よりさらに厳しくなる可能性が高い。
+4. **`gemma4-e4b-cpu`のVRAM使用量が2600MiB程度と少ないのは想定どおり。** CPU固定
+   (`OLLAMA_NUM_GPU=0`相当の設定、4日目〜7日目ノート参照)のため、画像入力時もGPUをほぼ使わない。
+   ただし②の分析どおり「GPUを使わない=速い」わけではなく、むしろ画像の場合は精度も速度も
+   悪化するため、VRAMが空いているからといってルーターに画像処理をさせる理由にはならない。
+
+### 改善策(結論。実装はこれから)
+
+- **専用vision対応モデルの追加導入は不要**(既存の`gemma4:26b`で足りる。④改善策・案A/Bは不採用)
+- ルーターに「画像添付あり」を検知する軽い判定を追加し、**画像添付時は分類ロジックを経由せず
+  強制的にDEEPへルーティングする**(ルーター自体に画像を読ませない。④改善策の案3を
+  「vision専用モデルへ」から「既存DEEPへ」に読み替えて採用)
+- `ollama_client.generate()`は今回`images`引数を追加済み(後方互換を維持。テスト
+  `tests/test_ollama_stream.py::TestGenerateImages`で確認済み)。DEEPルートは通常
+  ストリーミングのため、本実装時は`generate_stream()`にも同様の`images`対応を追加する必要がある
+- VRAM逼迫(残り約450〜600MiB)を踏まえ、画像添付時はFAST/CODEモデルを一時的に解放
+  (`ollama stop`)してからDEEPを呼ぶなど、通常のテキスト会話より慎重なVRAM管理を検討する
+- `static/index.html`・`voice_gateway.py`への画像アップロードUI・受信処理の実装(③のUI方針と
+  合わせて、④で実装済みの📎ボタン・ナレッジ一覧パネルと統一感のある形にする)
+
+---
+
+## ④-2 画像添付時はDEEPへ強制ルーティングの実装(2026-08-14)
+
+### 背景/目的
+
+④-1で「専用vision対応モデルの追加導入は不要(既存の`gemma4:26b`で足りる)」「ルーター(`gemma4-e4b-cpu`)へ画像を渡すのは精度・速度の両面で不利」という結論が出たため、その結論どおり「画像添付時はルーターを経由せず強制的にDEEPへルーティングする」実装(`router.py`の分岐追加・`ollama_client.generate_stream()`への`images`対応・アップロードUI)に着手した。
+
+### 設計(実装前にユーザーへ提示し承認を得た方針)
+
+既存の`router.py`/`ollama_client.py`/`support_ai_auto_pipe.py`/`voice_gateway.py`/`static/index.html`という既存フローへの変更のみで完結する**bounded**な変更として、以下の5点をセットで実装する方針とした。
+
+1. **`router.py`**: `RouterSession.get_route()`に`force_route: str | None = None`引数を追加。指定時はルールベース判定もgemma4-e4b-cpu呼び出しもスキップし、即座にそのrouteを返してセッション状態に記録する(ルーター自体に画像を読ませない土台)。
+2. **`ollama_client.py`**: `generate_stream()`に`generate()`と同じ`images: list[str] | None = None`引数を追加。指定時のみリクエストボディに`images`を含める(未指定時は挙動不変)。
+3. **`support_ai_auto_pipe.py`**: 新規`_extract_last_user_images(body)`を追加。最後のuserメッセージ辞書の`images`キー(base64文字列のlist、OpenWebUIの`content`list形式とは別の**独自convention**)を読む。`pipe()`内でこれを使い、画像があれば`session.get_route(..., force_route="DEEP")`でルーターを経由せず強制DEEP判定にし、`images`を`_stream_reply()`/`generate()`まで引き回す。
+4. **`voice_gateway.py`**: `run_turn()`に`images: list[str] | None = None`引数を追加し、`pipe.pipe(body=...)`の最後のuserメッセージへ`"images"`キーとして載せる。WS `text_input`ハンドラで`payload.get("images")`(base64文字列list、data URL prefixなし)を読み取り、`run_turn()`まで渡す。
+5. **`static/index.html`**: 既存の📎ボタン(PDF/Word等をRAGへ永続登録する別経路)とは別に、新規📷ボタン+`accept="image/*"`の隠しfile inputを追加。選択した画像をFileReaderでbase64化(data URL prefix除去)し「送信待ち」チップとして表示、送信時に`text_input`メッセージへ`images`配列として同梱、送信後にクリアする(ドキュメント添付とは異なり、画像はDBに永続登録せずそのターンだけのコンテキストとして扱う)。
+
+### 実装結果(2026-08-14実施)
+
+上記設計どおりに実装した。
+
+- `router.py`: `RouterSession.get_route()`へ`force_route`引数を追加(キーワード専用引数)。`force_route`指定時は`match_rule_based()`も`call_model`も一切呼ばれず、`_last_route[session_id]`へ記録して即返す。次ターンでは通常どおり`last_route`として文脈に渡り、「話題が続いていればDEEPのまま」という既存の継続性ロジックにそのまま乗る。
+- `ollama_client.py`: `generate_stream()`へ`images`引数を追加(`generate()`と対称な実装。未指定/空リストならリクエストボディに`images`キー自体が付かない後方互換を維持)。
+- `support_ai_auto_pipe.py`: `_extract_last_user_images()`を追加し、`pipe()`冒頭で`images = self._extract_last_user_images(body)` → `force_route = "DEEP" if images else None`として`session.get_route()`に渡すよう変更。ストリーミング経路(`_stream_reply()`)・非ストリーミング経路(`generate()`直接呼び出し)の両方に`images`を引き回した(DEEPが`streaming_mode="off"`等で非ストリーミング呼び出しになるケースも考慮)。
+- `voice_gateway.py`: `run_turn()`に`images`引数を追加し、`pipe.pipe()`へ渡す`messages`の最後のuserメッセージへ`"images"`キーとして載せる(未指定なら従来どおり`content`のみの辞書のまま)。WSメッセージ仕様のdocstringも更新し、`text_input`が`images`(任意)を受け取れることを明記した。WS `text_input`ハンドラでは`payload.get("images")`をリスト型・文字列要素のみにサニタイズしてから`run_turn()`へ渡す。
+- `static/index.html`: 📎(文書添付)の右隣に📷(画像添付)ボタンと`accept="image/*"`の隠しfile inputを追加。選択した画像は`FileReader.readAsDataURL()`→カンマ以降を切り出す形でdata URL prefixを除去してbase64化し、`pendingImages`配列に保持しつつ「📷 ファイル名(送信待ち)」チップ(✕ボタンで個別に送信対象から外せる)を表示する。`sendTextInput()`は`pendingImages`が空でなければ`text_input`メッセージへ`images`配列を同梱し、送信後に`clearPendingImages()`でチップと状態をクリアする。
+
+### テスト
+
+既存のユニットテスト方式(Ollama呼び出し・記憶レイヤーをフェイクに差し替える方式)を踏襲し、以下を追加した。
+
+| ファイル | 追加したテストの主旨 |
+|---|---|
+| `tests/test_router.py` | `force_route`指定時に`match_rule_based`相当のルールもcall_modelも一切呼ばれないこと、次ターンへ`last_route`として正しく引き継がれること |
+| `tests/test_ollama_stream.py` | `generate_stream()`の`images`引数がリクエストボディに反映されること、未指定/空リストなら`images`キー自体が付かない後方互換 |
+| `tests/test_support_ai_auto_pipe.py` | 非ストリーミング経路(`streaming_mode="off"`)で画像添付時に強制DEEP・`generate()`へ`images`が転送されること、ルーターモデル(`call_phi4`)が一切呼ばれないこと |
+| `tests/test_support_ai_auto_pipe_stream.py` | ストリーミング経路で画像添付時に強制DEEP・`generate_stream()`へ`images`が転送されること、画像無しの従来呼び出しは`images=None`のまま(後方互換) |
+| `tests/test_voice_gateway.py` | `run_turn()`の`images`引数がuserメッセージへ`"images"`キーとして反映されること、画像無しなら`images`キー自体が付かない後方互換 |
+
+`python -m pytest tests/ -q`で既存180件+新規25件(205件全件)が成功することを確認した(2026-08-14実施)。
+
+### 残課題
+
+- 実機確認(ブラウザで実際に📷ボタンから画像を添付して送信し、`[route: DEEP]`で応答が返ること、VRAMピークが④-1の単体計測(15705MiB)と同水準に収まることの確認)はまだ行っていない。次回セッションで実施する。
+- ④-1の残課題どおり、画像添付時にFAST/CODEモデルを一時的に解放(`ollama stop`)してからDEEPを呼ぶといったVRAM管理の強化は今回のスコープ外(YAGNI。実機で問題が出てから対応する)。
+- OpenWebUI標準の画像添付convention(`content`がlist形式になるケース)への対応は今回もスコープ外のまま(`_extract_last_user_text`は従来どおり非文字列contentを空文字扱いにする)。現状は`voice_gateway.py`経由の独自`images`convention専用。
+- 複数枚の画像添付(`pendingImages`は複数保持できる実装だが、UI上でまとめて何枚も選ぶ動線や、DEEP側での複数画像同時解釈の精度は未検証)。
 
 ---
 
@@ -431,5 +806,10 @@ python ws_e2e_bench.py --audio results/stt_bench/sample01.wav --url ws://127.0.0
 1. **①CLIベンチと実機(結果3)の乖離原因を特定する(最優先)**: gpt-oss:20bのCUDAクラッシュ・低速化への対処(Ollamaアップデート確認・リトライ追加)、`pipe_factory()`の呼び出し方式の違いの検証。これが解決するまで「8日目約1分からの改善幅」は暫定値にとどめる
 2. ②Web検索バックエンドを選定し、`web_search.py`を実装する
 3. ③UIデザインの方向性(OpenWebUI機能の取捨選択・HUD要素の扱い)を確定する
-4. ④PDF対応から着手し(着手コスト低)、その後vision対応モデルの検証・画像対応へ進む
+4. ~~④PDF対応から着手し(着手コスト低)~~ → 2026-08-13完了(Word/Excel/PowerPointも合わせて実装済み)。
+   ~~次は④-1「vision capabilityの有無を確認する」~~ → 2026-08-14完了(両モデルともvision対応・
+   `gemma4:26b`が実用精度と確認、専用モデル追加は不要)。
+   ~~次は「画像添付時はDEEPへ強制ルーティング」の実装(`router.py`の分岐追加・`generate_stream()`への
+   `images`対応・アップロードUI)に着手する~~ → 2026-08-14実装完了(④-2参照。単体テスト205件成功)。
+   次は④-2残課題の実機確認(ブラウザで📷ボタンから画像添付→DEEP応答・VRAM実測)に着手する
 5. [[サポートAI作製計画/9日目自前音声UIとストリーミング音声対話.md|9日目]]⑦(Tailscale Serveへの載せ替え・外出時CODEルート方針)は①⑧完了後に着手する方針を継続

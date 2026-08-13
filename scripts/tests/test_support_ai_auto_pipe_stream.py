@@ -34,8 +34,16 @@ from fakes import NoopMemoryStore, RecordingMemoryStore  # noqa: E402
 from ollama_client import OllamaError  # noqa: E402
 
 
-def make_body(text: str, chat_id: str = "chat-1", stream: bool | None = True) -> dict:
-    body: dict = {"chat_id": chat_id, "messages": [{"role": "user", "content": text}]}
+def make_body(
+    text: str,
+    chat_id: str = "chat-1",
+    stream: bool | None = True,
+    images: list[str] | None = None,
+) -> dict:
+    message: dict = {"role": "user", "content": text}
+    if images:
+        message["images"] = images
+    body: dict = {"chat_id": chat_id, "messages": [message]}
     if stream is not None:
         body["stream"] = stream
     return body
@@ -257,6 +265,53 @@ class TestStreamingMemoryWriteBack(StreamPipeTestCase):
 
         self.assertEqual(len(store.append_calls), 2)
         self.assertEqual(store.append_calls[1]["text"], "前半")
+
+
+class TestImageForcedRouting(StreamPipeTestCase):
+    """11日目④-1: 画像添付時はルーターを経由せず強制的にDEEPへルーティングされること。"""
+
+    def test_image_attachment_forces_deep_without_calling_router_model(self):
+        phi4_calls: list = []
+
+        def fake_call_phi4(system_prompt, user_text):
+            phi4_calls.append(user_text)
+            return '{"route": "FAST"}'  # 呼ばれてしまった場合に誤りが分かるようFASTを返す
+
+        router.call_phi4 = fake_call_phi4
+        recorder: list = []
+        self.set_stream_tokens(["青い箱", "が写っています"], recorder)
+        self.set_generate()
+
+        pipe = support_ai_auto_pipe.Pipe()
+        chunks = list(pipe.pipe(make_body("この画像は何?", images=["QUJD"])))
+
+        self.assertEqual(phi4_calls, [])  # ルーター(gemma4-e4b-cpu)は一切呼ばれない
+        self.assertEqual(chunks[0], "[route: DEEP]\n")
+        self.assertEqual(recorder[0]["model"], "gemma4:26b")
+
+    def test_images_are_forwarded_to_generate_stream(self):
+        self.set_route("DEEP")  # 分類自体は通常経路でも、images付きなら渡ること自体を確認
+        recorder: list = []
+        self.set_stream_tokens(["ok"], recorder)
+        self.set_generate()
+
+        pipe = support_ai_auto_pipe.Pipe()
+        list(pipe.pipe(make_body("この画像は何?", images=["QUJD", "RUZH"])))
+
+        self.assertEqual(recorder[0]["images"], ["QUJD", "RUZH"])
+
+    def test_no_images_omits_images_kwarg_value(self):
+        """後方互換の確認: 画像添付が無い従来の呼び出しはimages=Noneのまま渡る
+        (generate_stream側でリクエストボディにimagesキー自体が付かない)。"""
+        self.set_route("FAST")
+        recorder: list = []
+        self.set_stream_tokens(["こんにちは"], recorder)
+        self.set_generate()
+
+        pipe = support_ai_auto_pipe.Pipe()
+        list(pipe.pipe(make_body("今日の天気を教えて")))
+
+        self.assertIsNone(recorder[0]["images"])
 
 
 class TestStreamingErrorHandling(StreamPipeTestCase):

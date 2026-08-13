@@ -18,6 +18,19 @@
        経緯は10日目ノート⑦参照)
     + マイクの停止ボタン: 誤動作時にマイク入力そのものを止められるようにする
 
+  11日目ノート(サポートAI作製計画/11日目Web検索対応・UIデザイン確定・マルチモーダル対応調査.md)④で、
+  PDF/Word/Excel/PowerPointをナレッジ(LanceDB)へ永続登録する添付ボタン(📎)と、
+  登録済みナレッジの簡易一覧パネル(📚)を追加した。voice_gateway.py の
+  POST/GET /documents・DELETE /documents/{filename} を叩くだけで、WebSocket(/ws)側の
+  会話フローとは独立して動く(アップロード自体はそのターンの応答には使わず、次回以降の
+  会話でRAG検索にヒットする形で反映される。11日目ノートver2デザイン案の「マイクボタンの
+  左隣にクリップアイコン」という配置方針を踏襲)。
+
+  11日目ノート④-1で、画像添付ボタン(📷、📎の右隣)を追加した。📎と違い画像は
+  LanceDBへ永続登録せず、ブラウザ側で「送信待ち」として保持したまま次のtext_input
+  送信時に1回だけ同梱する。サーバ側(support_ai_auto_pipe.Pipe)は画像添付があれば
+  ルーターを経由せず強制的にDEEP(gemma4:26b)へルーティングする。
+
   voice_gateway.py の /ws に接続し、常時マイクON + 無音検出(サーバ側VAD)で
   自動的に発話を送信する。サーバから届く5種類+エラーのJSONメッセージ
   (partial_transcript / final_transcript / token / sentence / audio / state / error)を
@@ -128,15 +141,114 @@
   }
   #text-input:disabled { opacity: 0.5; }
   #text-input:focus { outline: 1px solid var(--accent); }
+
+  /* 11日目④: ファイル添付ボタン・ナレッジ一覧パネル */
+  #attach-btn {
+    background: var(--panel);
+    color: var(--text);
+    border: 1px solid #2a3040;
+    padding: 8px 12px;
+    font-size: 16px;
+    line-height: 1;
+  }
+  #attach-btn:hover:not(:disabled) { border-color: var(--accent); }
+  /* 11日目④-1: 画像添付ボタン(📎の文書添付とは別。DBへ永続登録せず、送信するそのターンだけ
+     DEEPへ強制ルーティングされる一時的なコンテキストとして扱う) */
+  #image-attach-btn {
+    background: var(--panel);
+    color: var(--text);
+    border: 1px solid #2a3040;
+    padding: 8px 12px;
+    font-size: 16px;
+    line-height: 1;
+  }
+  #image-attach-btn:hover:not(:disabled) { border-color: var(--accent); }
+  .chip .remove-btn {
+    background: transparent;
+    border: none;
+    color: var(--text-dim);
+    cursor: pointer;
+    padding: 0;
+    font-size: 12px;
+    line-height: 1;
+  }
+  .chip .remove-btn:hover { color: var(--error); }
+  #knowledge-btn {
+    background: var(--panel);
+    color: var(--text);
+    border: 1px solid #2a3040;
+    font-weight: 400;
+    font-size: 13px;
+  }
+  #knowledge-btn:hover { border-color: var(--accent); }
+
+  #attach-chips { display: flex; flex-wrap: wrap; gap: 6px; padding: 0 20px; }
+  .chip {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    background: var(--panel);
+    border: 1px solid #2a3040;
+    border-radius: 999px;
+    padding: 4px 10px;
+    font-size: 12px;
+    color: var(--text-dim);
+  }
+  .chip.error { color: var(--error); border-color: var(--error); }
+
+  #knowledge-panel {
+    display: none;
+    position: fixed;
+    top: 56px;
+    right: 20px;
+    width: 320px;
+    max-height: 60vh;
+    overflow-y: auto;
+    background: var(--panel);
+    border: 1px solid #2a3040;
+    border-radius: 10px;
+    padding: 12px;
+    z-index: 10;
+    box-shadow: 0 8px 24px rgba(0, 0, 0, 0.4);
+  }
+  #knowledge-panel.open { display: block; }
+  #knowledge-panel h2 { font-size: 13px; margin: 0 0 8px; color: var(--text-dim); }
+  .knowledge-item {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+    padding: 6px 0;
+    border-bottom: 1px solid #232a3a;
+    font-size: 13px;
+  }
+  .knowledge-item:last-child { border-bottom: none; }
+  .knowledge-item .name { overflow-wrap: anywhere; }
+  .knowledge-item .meta { color: var(--text-dim); font-size: 11px; }
+  .knowledge-item button {
+    background: transparent;
+    color: var(--error);
+    padding: 2px 8px;
+    font-size: 12px;
+  }
+  #knowledge-empty { color: var(--text-dim); font-size: 13px; }
 </style>
 </head>
 <body>
 <header>
   <h1>C.L.A.I.R.E. 音声対話</h1>
   <span id="state-badge" data-state="idle">idle</span>
+  <button id="knowledge-btn" title="登録済みナレッジの一覧">📚 ナレッジ</button>
 </header>
 
+<div id="knowledge-panel">
+  <h2>登録済みナレッジ</h2>
+  <div id="knowledge-list"></div>
+</div>
+
 <main id="log"></main>
+
+<div id="attach-chips"></div>
 
 <footer>
   <button id="start-btn">マイクを開始</button>
@@ -145,6 +257,10 @@
   <span id="footer-text">未接続</span>
 </footer>
 <footer id="text-input-bar">
+  <button id="attach-btn" title="PDF/Word/Excel/PowerPointをナレッジとして追加">📎</button>
+  <input id="file-input" type="file" accept=".pdf,.docx,.xlsx,.pptx" hidden />
+  <button id="image-attach-btn" title="画像を添付(送信するとDEEPへ強制ルーティングされます)">📷</button>
+  <input id="image-file-input" type="file" accept="image/*" hidden />
   <input id="text-input" type="text" placeholder="話すとここに書き起こされます。間違いを直して送信(Enter)" autocomplete="off" disabled />
   <button id="send-btn" disabled>送信</button>
 </footer>
@@ -166,6 +282,14 @@ const micIndicator = document.getElementById("mic-indicator");
 const footerText = document.getElementById("footer-text");
 const textInput = document.getElementById("text-input");
 const sendBtn = document.getElementById("send-btn");
+const attachBtn = document.getElementById("attach-btn");
+const fileInput = document.getElementById("file-input");
+const imageAttachBtn = document.getElementById("image-attach-btn");
+const imageFileInput = document.getElementById("image-file-input");
+const attachChips = document.getElementById("attach-chips");
+const knowledgeBtn = document.getElementById("knowledge-btn");
+const knowledgePanel = document.getElementById("knowledge-panel");
+const knowledgeList = document.getElementById("knowledge-list");
 
 // --- 状態 ------------------------------------------------------------
 let ws = null;
@@ -173,6 +297,9 @@ let audioCtx = null;
 let micStream = null;
 let micSource = null;
 let micProcessor = null;
+// 11日目④-1: 送信待ちの画像添付({name, base64, chip}のlist)。📎の文書添付と違い
+// DBへ永続登録せず、次に送信するテキストと一緒に1回だけWSへ乗せて送信後にクリアする。
+let pendingImages = [];
 let micMuted = false;           // 読み上げ中/推論中はtrueにしてサーバへ音声を送らない(エコー対策+10日目①)
 let currentState = "idle";      // サーバから届いた直近の state 値(10日目①: ミュート判定に使う)
 let assistantTurnEl = null;     // 現在組み立て中の応答表示<div>
@@ -465,8 +592,13 @@ function updateTextInputEnabled() {
 function sendTextInput() {
   const text = textInput.value.trim();
   if (!text || !canSendText()) return;
-  ws.send(JSON.stringify({ type: "text_input", text }));
+  const msg = { type: "text_input", text };
+  if (pendingImages.length > 0) {
+    msg.images = pendingImages.map((img) => img.base64);
+  }
+  ws.send(JSON.stringify(msg));
   textInput.value = "";
+  clearPendingImages();
 }
 
 sendBtn.addEventListener("click", sendTextInput);
@@ -476,6 +608,158 @@ textInput.addEventListener("keydown", (e) => {
     e.preventDefault();
     sendTextInput();
   }
+});
+
+// --- ナレッジ添付(11日目④: PDF/Word/Excel/PowerPoint) ---------------------------
+// voice_gateway.py の POST/GET /documents・DELETE /documents/{filename} を叩くだけの
+// 独立した機能(WebSocket上の会話フローとは無関係。アップロード後は次回以降の
+// 会話でRAG検索にヒットする形で反映される)。
+
+function addAttachChip(filename, statusText, isError) {
+  const chip = document.createElement("span");
+  chip.className = "chip" + (isError ? " error" : "");
+  chip.textContent = `📎 ${filename} — ${statusText}`;
+  attachChips.appendChild(chip);
+  return chip;
+}
+
+async function uploadDocument(file) {
+  const chip = addAttachChip(file.name, "アップロード中...", false);
+  const formData = new FormData();
+  formData.append("file", file);
+  try {
+    const resp = await fetch("/documents", { method: "POST", body: formData });
+    const body = await resp.json().catch(() => ({}));
+    if (!resp.ok) {
+      throw new Error(body.detail || `HTTP ${resp.status}`);
+    }
+    chip.textContent = `📎 ${file.name} — 登録済み(${body.chunks}チャンク)`;
+    appendTurn(`[ナレッジ登録] ${file.name}(${body.chunks}チャンク)`, "assistant");
+    refreshKnowledgeList();
+  } catch (e) {
+    chip.classList.add("error");
+    chip.textContent = `📎 ${file.name} — 失敗: ${e.message || e}`;
+  }
+}
+
+attachBtn.addEventListener("click", () => fileInput.click());
+fileInput.addEventListener("change", () => {
+  const file = fileInput.files?.[0];
+  fileInput.value = ""; // 同じファイルを連続選択しても change が発火するようにリセット
+  if (file) uploadDocument(file);
+});
+
+// --- 画像添付(11日目④-1: 送信するとDEEPへ強制ルーティングされる) -----------------
+// 📎の文書添付(/documents、DBへ永続登録)とは異なり、選択した画像はブラウザ側に
+// 「送信待ち」として保持するだけで、次に送信ボタン/Enterを押したテキストと一緒に
+// 1回だけWS(text_input.images)へ乗せて送る(voice_gateway.py→support_ai_auto_pipe.Pipe
+// 側で、画像添付があればルーターを経由せず強制的にDEEPへルーティングされる)。
+
+function fileToBase64(file) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => {
+      // dataURLは "data:image/png;base64,xxxx" の形なので、base64本体だけ取り出す
+      // (Ollama /api/generate の images はdata URL prefix無しの生base64を期待する)。
+      const dataUrl = reader.result || "";
+      const commaIdx = dataUrl.indexOf(",");
+      resolve(commaIdx >= 0 ? dataUrl.slice(commaIdx + 1) : dataUrl);
+    };
+    reader.onerror = () => reject(reader.error || new Error("画像の読み込みに失敗しました"));
+    reader.readAsDataURL(file);
+  });
+}
+
+function renderPendingImageChip(entry) {
+  const chip = document.createElement("span");
+  chip.className = "chip";
+  const label = document.createElement("span");
+  label.textContent = `📷 ${entry.name}(送信待ち)`;
+  const removeBtn = document.createElement("button");
+  removeBtn.className = "remove-btn";
+  removeBtn.textContent = "✕";
+  removeBtn.title = "この画像を送信対象から外す";
+  removeBtn.addEventListener("click", () => removePendingImage(entry));
+  chip.appendChild(label);
+  chip.appendChild(removeBtn);
+  attachChips.appendChild(chip);
+  entry.chip = chip;
+}
+
+function removePendingImage(entry) {
+  pendingImages = pendingImages.filter((img) => img !== entry);
+  entry.chip?.remove();
+}
+
+function clearPendingImages() {
+  for (const entry of pendingImages) {
+    entry.chip?.remove();
+  }
+  pendingImages = [];
+}
+
+async function addPendingImage(file) {
+  try {
+    const base64 = await fileToBase64(file);
+    const entry = { name: file.name, base64 };
+    pendingImages.push(entry);
+    renderPendingImageChip(entry);
+  } catch (e) {
+    addAttachChip(file.name, `画像の読み込みに失敗: ${e.message || e}`, true);
+  }
+}
+
+imageAttachBtn.addEventListener("click", () => imageFileInput.click());
+imageFileInput.addEventListener("change", () => {
+  const file = imageFileInput.files?.[0];
+  imageFileInput.value = ""; // 同じファイルを連続選択しても change が発火するようにリセット
+  if (file) addPendingImage(file);
+});
+
+// --- ナレッジ一覧パネル(簡易版: ファイル名・チャンク数・削除ボタンのみ) -----------
+async function refreshKnowledgeList() {
+  try {
+    const resp = await fetch("/documents");
+    const docs = await resp.json();
+    renderKnowledgeList(docs);
+  } catch (e) {
+    knowledgeList.innerHTML = `<div id="knowledge-empty">一覧の取得に失敗しました: ${e.message || e}</div>`;
+  }
+}
+
+function renderKnowledgeList(docs) {
+  knowledgeList.innerHTML = "";
+  if (!docs || docs.length === 0) {
+    knowledgeList.innerHTML = `<div id="knowledge-empty">登録済みのナレッジはありません</div>`;
+    return;
+  }
+  for (const doc of docs) {
+    const item = document.createElement("div");
+    item.className = "knowledge-item";
+    const info = document.createElement("div");
+    info.innerHTML = `<div class="name">${doc.filename}</div><div class="meta">${doc.chunks}チャンク・${doc.date}</div>`;
+    const delBtn = document.createElement("button");
+    delBtn.textContent = "削除";
+    delBtn.addEventListener("click", () => deleteDocument(doc.filename));
+    item.appendChild(info);
+    item.appendChild(delBtn);
+    knowledgeList.appendChild(item);
+  }
+}
+
+async function deleteDocument(filename) {
+  try {
+    await fetch(`/documents/${encodeURIComponent(filename)}`, { method: "DELETE" });
+    refreshKnowledgeList();
+  } catch (e) {
+    logError(`ナレッジの削除に失敗: ${e.message || e}`);
+  }
+}
+
+knowledgeBtn.addEventListener("click", () => {
+  const willOpen = !knowledgePanel.classList.contains("open");
+  knowledgePanel.classList.toggle("open", willOpen);
+  if (willOpen) refreshKnowledgeList();
 });
 
 // --- 起動 -----------------------------------------------------------------

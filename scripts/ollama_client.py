@@ -6,6 +6,9 @@ requests等の追加依存を持ち込まない(monitor_ollama.pyの既存方針
 
 提供する関数:
   - generate(): /api/generate を叩き、生成テキストを1回分(stream=False)取得する。
+    11日目④-1: `images`引数(base64エンコード済み画像のリスト)を渡せる
+    (Ollamaのvision対応モデル向け。未指定なら従来どおりテキストのみのリクエストで、
+    既存呼び出し元(router.py等)の挙動は変えない)。
   - generate_stream(): /api/generate を stream=True で叩き、トークンを逐次yieldする。
   - list_running_models(): /api/ps を叩き、現在ロード済みのモデル名一覧を取得する。
   - stop_model(): `ollama stop <model>` をCLI経由で実行する(/api/generateに
@@ -37,6 +40,7 @@ def generate(
     timeout: float = 60.0,
     options: dict | None = None,
     think: bool | None = None,
+    images: list[str] | None = None,
 ) -> str:
     """/api/generate を1回だけ叩き、レスポンステキストを返す(stream=False)。
 
@@ -50,6 +54,12 @@ def generate(
     gemma4:e2b等、既定でthinkingモード(内部CoT)が有効なモデルを
     think:false固定で呼び出したい場合に指定する(7日目⓪)。
     Noneなら`think`フィールド自体を送らず、モデルの既定値に委ねる。
+
+    images: base64エンコード済み画像(データURLのprefix無し、生のbase64文字列)のリスト。
+    11日目④-1の検討事項どおり、`gemma4-e4b-cpu`/`gemma4:26b`は`/api/show`で
+    `capabilities`に`vision`が含まれることを確認済み(vision_bench.py参照)。
+    Noneなら`images`フィールド自体を送らず、既存呼び出し元(router.py等)の
+    リクエストボディは一切変わらない(後方互換)。
     """
     body: dict = {
         "model": model,
@@ -63,6 +73,8 @@ def generate(
         body["options"] = options
     if think is not None:
         body["think"] = think
+    if images:
+        body["images"] = images
 
     data = json.dumps(body).encode("utf-8")
     req = urllib.request.Request(
@@ -91,6 +103,7 @@ def generate_stream(
     timeout: float = 60.0,
     options: dict | None = None,
     think: bool | None = None,
+    images: list[str] | None = None,
 ) -> Iterator[str]:
     """/api/generate を stream=True で叩き、生成トークンを届いた順にyieldする。
 
@@ -112,6 +125,11 @@ def generate_stream(
     接続失敗・タイムアウト・不正JSON・チャンク内の`error`フィールドの
     いずれもOllamaErrorとして送出する。ただし読み取り途中で起きた失敗は
     (性質上)最初の呼び出しではなくイテレート中に送出される。
+
+    images: `generate()`と同じ意味(base64エンコード済み画像のリスト)。
+    11日目④-1「画像添付時はDEEPへ強制ルーティング」の実装で、DEEPルートは
+    通常ストリーミング応答のため`generate()`だけでなく本関数にも同じ引数を追加した。
+    Noneなら`images`フィールド自体を送らず、既存呼び出し元の挙動は変わらない。
     """
     body: dict = {
         "model": model,
@@ -125,6 +143,8 @@ def generate_stream(
         body["options"] = options
     if think is not None:
         body["think"] = think
+    if images:
+        body["images"] = images
 
     data = json.dumps(body).encode("utf-8")
     req = urllib.request.Request(

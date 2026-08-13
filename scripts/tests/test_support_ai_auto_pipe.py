@@ -28,10 +28,13 @@ from fakes import NoopMemoryStore  # noqa: E402
 from ollama_client import OllamaError  # noqa: E402
 
 
-def make_body(text: str, chat_id: str = "chat-1") -> dict:
+def make_body(text: str, chat_id: str = "chat-1", images: list[str] | None = None) -> dict:
+    message: dict = {"role": "user", "content": text}
+    if images:
+        message["images"] = images
     return {
         "chat_id": chat_id,
-        "messages": [{"role": "user", "content": text}],
+        "messages": [message],
     }
 
 
@@ -232,6 +235,33 @@ class TestSupportAiAutoPipe(unittest.TestCase):
 
         self.assertNotIn("[route:", result)
         self.assertEqual(result, "回答本文")
+
+    def test_image_attachment_forces_deep_and_forwards_images_non_streaming(self):
+        # 11日目④-1: 非ストリーミング経路(streaming_modeが"off"の場合等)でも、
+        # 画像添付があればルーターを経由せず強制DEEP・generate()へimagesが渡ること。
+        phi4_calls: list = []
+
+        def fake_call_phi4(system_prompt, user_text):
+            phi4_calls.append(user_text)
+            return '{"route": "FAST"}'
+
+        recorder: list = []
+
+        def fake_generate(model, prompt, **kwargs):
+            recorder.append({"model": model, **kwargs})
+            return "青い箱と赤い楕円が写っています"
+
+        router.call_phi4 = fake_call_phi4
+        support_ai_auto_pipe.generate = fake_generate
+
+        pipe = support_ai_auto_pipe.Pipe()
+        pipe.valves.streaming_mode = "off"
+        result = pipe.pipe(make_body("この画像は何?", images=["QUJD"]))
+
+        self.assertEqual(phi4_calls, [])
+        self.assertIn("[route: DEEP]", result)
+        self.assertEqual(recorder[0]["model"], "gemma4:26b")
+        self.assertEqual(recorder[0]["images"], ["QUJD"])
 
     def test_task_call_bypasses_routing_and_does_not_poison_session(self):
         # 6日目⑧-2「マツコ問題」の根本原因の再発防止テスト。

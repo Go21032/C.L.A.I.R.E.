@@ -161,7 +161,22 @@ class RouterSession:
         session_id: str,
         text: str,
         call_model: Callable[[str, str], str],
+        *,
+        force_route: str | None = None,
     ) -> str:
+        """質問文からルートを1つ決定し、セッションへ記録する。
+
+        force_route: 11日目④-1で結論を出した「画像添付時はDEEPへ強制ルーティングし、
+        ルーター自体には画像を読ませない」を実現するための引数。指定された場合は
+        ルールベース判定(match_rule_based)もPhi-4-mini/gemma4-e4b-cpu呼び出し
+        (call_model)も一切行わず、そのrouteをそのままセッションへ記録して返す。
+        画像添付の有無だけを見る軽い判定は呼び出し側(support_ai_auto_pipe.pipe())の
+        責務とし、ここでは「強制されたら従う」だけに徹する。
+        """
+        if force_route is not None:
+            self._last_route[session_id] = force_route
+            return force_route
+
         rule_route = match_rule_based(text)
         if rule_route is not None:
             self._last_route[session_id] = rule_route

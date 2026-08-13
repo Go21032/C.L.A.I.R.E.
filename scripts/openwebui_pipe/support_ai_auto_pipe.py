@@ -211,6 +211,27 @@ class Pipe:
         return ""
 
     @staticmethod
+    def _extract_last_user_images(body: dict) -> list[str]:
+        """最後のuserメッセージに添付された画像(base64文字列のリスト)を取り出す。
+
+        11日目④-1: OpenWebUIの「contentがlist形式になる」画像添付convention
+        (`content: [{"type": "text", ...}, {"type": "image_url", ...}]`)は
+        本Pipeでは元々解釈していない(_extract_last_user_textが空文字扱いにするだけ)。
+        本実装ではそれとは別に、voice_gateway.py(自前UI)が組み立てる独自convention
+        ―― 最後のuserメッセージ辞書に`"images"`キー(base64文字列のlist、
+        data URL prefix無し)を直接持たせる形 ―― を読む。将来OpenWebUI側の
+        画像添付にも対応する場合は、ここへ変換ロジックを足す形で拡張する想定。
+        """
+        messages = body.get("messages", [])
+        for message in reversed(messages):
+            if message.get("role") == "user":
+                images = message.get("images")
+                if isinstance(images, list):
+                    return [img for img in images if isinstance(img, str) and img]
+                return []
+        return []
+
+    @staticmethod
     def _is_confirmation(text: str) -> bool:
         """ユーザーの発言が「実行してよい」という肯定的な返事かどうかを判定する。
 
@@ -302,11 +323,14 @@ class Pipe:
             # route='NOTE'で取り込んだノート由来の記憶(このプロジェクトの
             # 設計ノートはコード関連の記述が中心)が一切ヒットしなくなる
             # 設計上の衝突が実データ検証で判明したため、CODEルートは
-            # CODEとNOTEの両方に絞り込む。
+            # CODE・NOTEの両方に絞り込む。11日目④でPDF/Word/Excel/PowerPoint取り込み
+            # (doc_ingest.py、role='document'/route='DOCUMENT')を追加したため、
+            # 同様にCODEルートでもナレッジ由来の記憶がヒットするよう対象へ加えた
+            # (FAST/DEEPはroute=Noneで元々フィルタ無しのため変更不要)。
             hits = memory_store.retrieve(
                 user_text,
                 limit=self.valves.memory_top_k,
-                route=("CODE", "NOTE") if route == "CODE" else None,
+                route=("CODE", "NOTE", "DOCUMENT") if route == "CODE" else None,
             )
             return memory_store.format_context(hits)
         except Exception as e:  # 記憶レイヤーの障害で本体を止めない(④完了条件)
@@ -343,6 +367,7 @@ class Pipe:
         user_text: str,
         memory_context: str,
         prefix: str,
+        images: list[str] | None = None,
     ) -> Iterator[str]:
         """FAST/DEEPの応答をトークン単位でyieldするジェネレータ(9日目④)。
 
@@ -356,6 +381,9 @@ class Pipe:
             そこまでの応答を残すため、finallyに置く。
           - デバッグ接頭辞`[route: FAST]`は記憶には含めない(6日目④⑤と同じく
             モデルの生応答だけを書き戻す)。
+          - images: 11日目④-1「画像添付時はDEEPへ強制ルーティング」対応。
+            画像添付が無いターン(従来通り)ではNone/空のままgenerate_streamへ渡り、
+            既存呼び出し元の挙動は変わらない。
         """
         target_model = router.ROUTE_MODEL_MAP[route]
         if prefix:
@@ -366,7 +394,10 @@ class Pipe:
             try:
                 router.ensure_model_ready(route)
                 stream = generate_stream(
-                    model=target_model, prompt=user_text, system=memory_context or None
+                    model=target_model,
+                    prompt=user_text,
+                    system=memory_context or None,
+                    images=images or None,
                 )
             except OllamaError as e:
                 yield f"[error] {target_model} の呼び出しに失敗しました: {e}"
@@ -423,9 +454,16 @@ class Pipe:
 
         session = self._get_session(chat_id)
 
+        # 11日目④-1: 画像添付があれば、ルーター(Phi-4-mini/gemma4-e4b-cpu)自体には
+        # 画像を読ませず、分類ロジックを経由せず強制的にDEEPへルーティングする
+        # (実測で、ルーターは画像に対してハルシネーションを起こしたうえ、
+        # gemma4:26b(DEEP)より1.7倍近く遅かった。詳細は11日目ノート④-1参照)。
+        images = self._extract_last_user_images(body)
+        force_route = "DEEP" if images else None
+
         error_prefix = ""
         try:
-            route = session.get_route(chat_id, user_text, router.call_phi4)
+            route = session.get_route(chat_id, user_text, router.call_phi4, force_route=force_route)
         except OllamaError as e:
             route = router.DEFAULT_FALLBACK_ROUTE
             error_prefix = (
@@ -454,7 +492,7 @@ class Pipe:
         # ここでIteratorを返して以降の「全文を待つ」経路には入らない。
         if self._should_stream(body, route):
             return self._stream_reply(
-                chat_id, route, user_text, memory_context, f"{error_prefix}{debug_prefix}"
+                chat_id, route, user_text, memory_context, f"{error_prefix}{debug_prefix}", images=images
             )
 
         try:
@@ -469,7 +507,14 @@ class Pipe:
                     system_prompt = f"{CODE_ACTION_SYSTEM_PROMPT}\n\n{memory_context}"
                 reply = generate(model=target_model, prompt=user_text, system=system_prompt)
             else:
-                reply = generate(model=target_model, prompt=user_text, system=memory_context or None)
+                # images: 11日目④-1。DEEPが非ストリーミング(streaming_mode="off"等)で
+                # 呼ばれた場合でも画像を渡せるよう、ここでも後方互換のoptional引数として渡す。
+                reply = generate(
+                    model=target_model,
+                    prompt=user_text,
+                    system=memory_context or None,
+                    images=images or None,
+                )
         except OllamaError as e:
             target_model = router.ROUTE_MODEL_MAP[route]
             return f"{error_prefix}{debug_prefix}[error] {target_model} の呼び出しに失敗しました: {e}"

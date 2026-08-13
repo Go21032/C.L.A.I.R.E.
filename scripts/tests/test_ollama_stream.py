@@ -271,5 +271,104 @@ class TestGenerateBackwardCompatibility(unittest.TestCase):
         self.assertEqual(result, "全文")
 
 
+class TestGenerateImages(unittest.TestCase):
+    """11日目④-1: generate()の`images`引数(vision対応モデル向け)のテスト。"""
+
+    def _fake_urlopen_recording(self, recorder: list, response_text: str = "画像の説明です"):
+        payload = json.dumps({"response": response_text, "done": True}).encode("utf-8")
+
+        class OneShotResponse:
+            def read(self):
+                return payload
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *exc_info):
+                return False
+
+        def fake_urlopen(req, timeout=None):
+            recorder.append(req)
+            return OneShotResponse()
+
+        return fake_urlopen
+
+    def test_images_are_included_in_request_body_when_given(self):
+        recorder: list = []
+        with mock.patch.object(
+            ollama_client.urllib.request, "urlopen", self._fake_urlopen_recording(recorder)
+        ):
+            result = ollama_client.generate(model="gemma4:26b", prompt="この画像を説明して", images=["QUJD"])
+
+        body = json.loads(recorder[0].data.decode("utf-8"))
+        self.assertEqual(body["images"], ["QUJD"])
+        self.assertEqual(result, "画像の説明です")
+
+    def test_images_field_is_omitted_when_not_given(self):
+        """後方互換の確認: imagesを渡さない既存呼び出し元(router.py等)はbodyにimagesキー自体が付かない。"""
+        recorder: list = []
+        with mock.patch.object(
+            ollama_client.urllib.request, "urlopen", self._fake_urlopen_recording(recorder)
+        ):
+            ollama_client.generate(model="m", prompt="p")
+
+        body = json.loads(recorder[0].data.decode("utf-8"))
+        self.assertNotIn("images", body)
+
+    def test_empty_images_list_is_also_omitted(self):
+        recorder: list = []
+        with mock.patch.object(
+            ollama_client.urllib.request, "urlopen", self._fake_urlopen_recording(recorder)
+        ):
+            ollama_client.generate(model="m", prompt="p", images=[])
+
+        body = json.loads(recorder[0].data.decode("utf-8"))
+        self.assertNotIn("images", body)
+
+
+class TestGenerateStreamImages(unittest.TestCase):
+    """11日目④-1: generate_stream()にも`images`引数(DEEPルートの通常経路)を追加した確認。"""
+
+    def _patch_urlopen(self, response, recorder: list | None = None):
+        def fake_urlopen(req, timeout=None):
+            if recorder is not None:
+                recorder.append(req)
+            return response
+
+        return mock.patch.object(ollama_client.urllib.request, "urlopen", fake_urlopen)
+
+    def test_images_are_included_in_request_body_when_given(self):
+        recorder: list = []
+        resp = FakeResponse(token_chunks(["この", "画像は…"]))
+        with self._patch_urlopen(resp, recorder):
+            tokens = list(
+                ollama_client.generate_stream(model="gemma4:26b", prompt="この画像を説明して", images=["QUJD"])
+            )
+
+        body = json.loads(recorder[0].data.decode("utf-8"))
+        self.assertEqual(body["images"], ["QUJD"])
+        self.assertEqual(tokens, ["この", "画像は…"])
+
+    def test_images_field_is_omitted_when_not_given(self):
+        """後方互換の確認: imagesを渡さない既存呼び出し元(support_ai_auto_pipe.py等)は
+        bodyにimagesキー自体が付かない。"""
+        recorder: list = []
+        resp = FakeResponse(token_chunks(["x"]))
+        with self._patch_urlopen(resp, recorder):
+            list(ollama_client.generate_stream(model="m", prompt="p"))
+
+        body = json.loads(recorder[0].data.decode("utf-8"))
+        self.assertNotIn("images", body)
+
+    def test_empty_images_list_is_also_omitted(self):
+        recorder: list = []
+        resp = FakeResponse(token_chunks(["x"]))
+        with self._patch_urlopen(resp, recorder):
+            list(ollama_client.generate_stream(model="m", prompt="p", images=[]))
+
+        body = json.loads(recorder[0].data.decode("utf-8"))
+        self.assertNotIn("images", body)
+
+
 if __name__ == "__main__":
     unittest.main()
