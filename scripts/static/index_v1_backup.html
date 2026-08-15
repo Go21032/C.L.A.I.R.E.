@@ -31,13 +31,6 @@
   送信時に1回だけ同梱する。サーバ側(support_ai_auto_pipe.Pipe)は画像添付があれば
   ルーターを経由せず強制的にDEEP(gemma4:26b)へルーティングする。
 
-  13日目「直近添付ファイルを自動優先」対応: 📎で文書(PDF/Word/Excel/PowerPoint等)を
-  アップロードして登録が成功すると、そのファイル名を`lastAttachedDocument`へ覚えておき、
-  次のtext_input送信1回だけ`attached_document`キーとして同梱してクリアする
-  (pendingImagesと同じ「一度きり」方式。sticky厳禁)。「このファイルを要約して」のような
-  あいまいな依頼でも、直近添付した1ファイルの記憶へ検索を優先的に絞り込めるようにする狙い
-  (voice_gateway.py→support_ai_auto_pipe.Pipe._recall()参照)。
-
   voice_gateway.py の /ws に接続し、常時マイクON + 無音検出(サーバ側VAD)で
   自動的に発話を送信する。サーバから届く5種類+エラーのJSONメッセージ
   (partial_transcript / final_transcript / token / sentence / audio / state / error)を
@@ -54,19 +47,14 @@
     - 上のJS(WebSocket接続・録音・ダウンサンプル・送信・ナレッジ添付・画像添付)は
       一切変更していない。すべての既存id(#log, #state-badge, #start-btn, #stop-btn,
       #mic-indicator, #footer-text, #text-input, #send-btn, #attach-btn, #file-input,
-      #attach-chips, #knowledge-btn, #knowledge-panel, #knowledge-list)はそのまま温存し、
-      置き場所(コンテナ)だけをver2のグリッド(topbar/sidebar/stage/pad/right)に組み替えた。
-    - 12日目追記: 📷(#image-attach-btn/#image-file-input)は廃止し📎(#attach-btn/#file-input)に
-      統合した。#file-inputのaccept属性に image/* を加え、change時のMIMEタイプ判定で
-      画像なら旧📷と同じ「送信待ち→次の送信でDEEP強制ルーティング」経路(addPendingImage)、
-      それ以外(PDF/Word/Excel/PowerPoint)は従来どおりナレッジ永続登録(uploadDocument)に
-      振り分けている(詳細は12日目ノート追記分参照)。
-    - 右パネルのActive Model/Pipeline/Event Log・トップバーのモデル切替ドロップダウン/
-      テレメトリ・入力パッド左側のピル表示は機能を繋いでいない「見た目だけ」の要素。
-      MOCKコメント(未接続)を付けて明示した(12日目ノート②残課題参照)。
-    - サイドバー(会話履歴)は14日目②でGET/POST/PATCH/DELETE /sessionsへ接続した
-      (New Session・過去ログの復元・リネーム・削除・検索。詳細は14日目ノート②参照)。
-      MOCKコメント/バッジは撤去済み。
+      #image-attach-btn, #image-file-input, #attach-chips, #knowledge-btn,
+      #knowledge-panel, #knowledge-list)はそのまま温存し、置き場所(コンテナ)だけを
+      ver2のグリッド(topbar/sidebar/stage/pad/right)に組み替えた。
+    - サイドバー(会話履歴)・右パネルのActive Model/Pipeline/Controls/Event Log・
+      トップバーのモデル切替ドロップダウン/テレメトリ・入力パッド左側のピル表示は
+      機能を繋いでいない「見た目だけ」の要素。MOCKコメント(未接続)を付けて明示した
+      (履歴の永続化設計・読み上げ速度WS対応・Web検索実装が未着手のため。
+      12日目ノート②残課題参照)。
     - ver2のリング描画・モデル選択の見た目切替・読み上げ速度スライダーの見た目更新は
       「見た目のみ動くデコレーション」として、下の第2<script>ブロック(ver2由来)に
       分離して残した。これも既存の音声/送信ロジックには一切触れていない。
@@ -288,7 +276,7 @@
   }
   #knowledge-btn:hover { border-color: var(--accent-cyan); color: var(--accent-cyan); }
 
-  /* === SIDEBAR (会話履歴。14日目②でGET/POST/PATCH/DELETE /sessionsへ接続) === */
+  /* === SIDEBAR (会話履歴。12日目②: 見た目のみ、機能は未接続) === */
   .sidebar { grid-area: sidebar; background: var(--bg-panel); display: flex; flex-direction: column; overflow: hidden; }
   .panel-head { padding: 14px 18px 10px; display: flex; align-items: center; justify-content: space-between; }
   .panel-title { font-family: var(--f-display); font-size: 11px; letter-spacing: 0.3em; color: var(--accent-cyan); text-transform: uppercase; }
@@ -447,26 +435,13 @@
   /* --- 読み上げ速度調整バー(見た目のみ。VOICEVOX speedScaleへの反映は未実装) --- */
   .rate-control { padding: 10px 0 4px; }
   .rate-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 8px; }
-  .rate-head .lab { display: flex; align-items: center; gap: 8px; font-family: var(--f-ui); font-size: 13px; color: var(--text-primary); white-space: nowrap; min-width: 0; }
+  .rate-head .lab { display: flex; align-items: center; gap: 8px; font-family: var(--f-ui); font-size: 13px; color: var(--text-primary); }
   .rate-head .lab .ico { width: 18px; height: 18px; color: var(--accent-cyan); }
   .rate-head .val {
     font-family: var(--f-mono); font-size: 11px; color: var(--accent-cyan);
     background: var(--accent-cyan-soft); border: 1px solid var(--line-strong);
     border-radius: 3px; padding: 2px 7px; min-width: 44px; text-align: center;
   }
-  /* 15日目②(指示3): 数値をキーボードでも直接編集できるよう<input>化した分の見た目リセット */
-  input.rate-head-val, .rate-head input.val {
-    font: inherit; outline: none; -moz-appearance: textfield;
-    /* <input>化でブラウザ既定の内容幅(size=20相当)が効いてしまい、
-       .rate-head .val の min-width:44px を大きく超えて広がっていた。
-       これが原因で .rate-head が space-between で右側(入力欄)に幅を取られ、
-       左側の「読み上げ速度」ラベルが折り返される不具合が起きていたため、
-       幅を明示的に固定してspanだった頃と同じ見た目に戻す。 */
-    width: 44px; box-sizing: border-box; flex: none;
-  }
-  .rate-head input.val::-webkit-inner-spin-button,
-  .rate-head input.val::-webkit-outer-spin-button { -webkit-appearance: none; margin: 0; }
-  .rate-head input.val:focus { border-color: var(--accent-cyan); }
   .rate-slider { position: relative; padding: 4px 2px 2px; }
   .rate-slider input[type="range"] {
     -webkit-appearance: none; appearance: none;
@@ -505,11 +480,6 @@
     font-family: var(--f-mono); font-size: 10.5px; color: var(--text-secondary);
   }
   .chip.error { color: var(--danger); border-color: var(--danger); }
-  /* 14日目①: ピン留め中のファイルを示すチップ(📌 <ファイル名>(全文/検索)について回答中) */
-  .chip.pinned-chip { color: var(--accent-cyan); border-color: var(--accent-cyan); background: var(--accent-cyan-soft); }
-  .chip.pinned-chip button {
-    background: transparent; border: none; color: inherit; cursor: pointer; padding: 0; font-size: 12px; line-height: 1;
-  }
   .chip .remove-btn {
     background: transparent;
     border: none;
@@ -526,7 +496,7 @@
   .pad-right { justify-content: flex-end; }
   .pad-mid { display: flex; align-items: center; justify-content: center; gap: 12px; }
 
-  /* --- ファイル添付ボタン(実体は既存の#attach-btn。12日目追記で📷を統合済み) --- */
+  /* --- ファイル添付ボタン(実体は既存の#attach-btn/#image-attach-btn) --- */
   .attach-btn {
     width: 44px; height: 44px; border-radius: 12px;
     background: var(--bg-panel-2);
@@ -577,14 +547,6 @@
     background: var(--danger);
     border-color: var(--danger);
     box-shadow: 0 0 10px 2px rgba(255, 107, 107, 0.6);
-  }
-  /* 13日目②: ウェイクワード検出後「受付中(armed)」であることを一目で分かるようにする
-     視覚フィードバック(10日目⑦の反省点「呼ばれたことが分からない」への対策)。
-     activeとwake-armedは同時に付きうるが、armedの水色を優先して見せる。 */
-  #mic-indicator.wake-armed {
-    background: var(--accent-cyan);
-    border-color: var(--accent-cyan);
-    box-shadow: 0 0 10px 3px var(--accent-cyan-soft, rgba(0, 200, 255, 0.6));
   }
 
   #footer-text { font-family: var(--f-mono); font-size: 10px; color: var(--text-muted); white-space: nowrap; }
@@ -664,10 +626,6 @@
     font-size: 13px;
   }
   .knowledge-item:last-child { border-bottom: none; }
-  .knowledge-item .info { cursor: pointer; flex: 1; min-width: 0; }
-  /* 14日目①: クリックでピン留め(対象ファイル指定)。選択中は目立たせる */
-  .knowledge-item.pinned { background: var(--accent-cyan-soft); border-radius: 4px; }
-  .knowledge-item.pinned .name::before { content: "📌 "; }
   .knowledge-item .name { overflow-wrap: anywhere; color: var(--text-primary); }
   .knowledge-item .meta { color: var(--text-muted); font-family: var(--f-mono); font-size: 10.5px; }
   .knowledge-item button {
@@ -734,18 +692,44 @@
   </header>
 
   <!-- ============== SIDEBAR(会話履歴) ============== -->
-  <!-- 14日目②: GET/POST/PATCH/DELETE /sessions を叩いて動的描画する(履歴の永続化)。
-       history/hist-searchの中身はrenderSessionList()が組み立てる(下のscript参照)。 -->
+  <!-- MOCK: 未接続。履歴の永続化設計が未着手のため、リネーム/削除/検索/切替は
+       すべてダミー(クリックしても何も起きない)。12日目②残課題参照 -->
   <aside class="sidebar">
     <div class="panel-head">
       <div class="panel-title">// Conversations</div>
+      <div class="panel-action">MOCK</div>
     </div>
-    <button id="new-session-btn" class="new-chat"><span class="plus">+</span> New Session</button>
+    <button class="new-chat"><span class="plus">+</span> New Session</button>
     <div class="hist-search">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="7"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
-      <input id="session-search-input" type="text" placeholder="会話を検索…">
+      <input type="text" placeholder="会話を検索…(未接続)">
     </div>
-    <nav id="session-history" class="history"></nav>
+    <nav class="history">
+      <div class="hist-group">Today</div>
+      <div class="hist-item active">
+        <div class="ti">12日目 UIver2反映 <span class="tag">UI</span></div>
+        <div class="pr">確定デザインをstatic/index.htmlへ骨格移植</div>
+        <div class="meta"><span>今日</span><span>·</span><span>—</span></div>
+        <div class="hist-actions">
+          <button class="rename" title="名前を変更(未接続)">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 20h9"/><path d="M16.5 3.5a2.12 2.12 0 0 1 3 3L7 19l-4 1 1-4Z"/></svg>
+          </button>
+          <button class="delete" title="削除(未接続)">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/><path d="M10 11v6M14 11v6"/></svg>
+          </button>
+        </div>
+      </div>
+      <div class="hist-group">Earlier</div>
+      <div class="hist-item">
+        <div class="ti">11日目 UIデザイン確定 <span class="tag">DESIGN</span></div>
+        <div class="pr">OpenWebUI/JARVIS動画の比較から不足項目を洗い出す</div>
+        <div class="meta"><span>—</span><span>·</span><span>—</span></div>
+        <div class="hist-actions">
+          <button class="rename" title="名前を変更(未接続)"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 20h9"/><path d="M16.5 3.5a2.12 2.12 0 0 1 3 3L7 19l-4 1 1-4Z"/></svg></button>
+          <button class="delete" title="削除(未接続)"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/><path d="M10 11v6M14 11v6"/></svg></button>
+        </div>
+      </div>
+    </nav>
     <div class="sidebar-foot">
       <div class="av">G</div>
       <div>
@@ -828,11 +812,11 @@
       <div class="panel-head" style="padding:0 0 10px;">
         <div class="panel-title">// Controls</div>
       </div>
-      <div class="switch" data-control="wake">
+      <div class="switch">
         <span class="lab"><svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"/><path d="M19 10v2a7 7 0 0 1-14 0v-2M12 19v4M8 23h8"/></svg>ウェイクワード</span>
         <div class="toggle"></div>
       </div>
-      <div class="switch" data-control="autosend">
+      <div class="switch">
         <span class="lab"><svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 3h7v7H3zM14 3h7v7h-7zM14 14h7v7h-7zM3 14h7v7H3z"/></svg>自動送信 (VAD)</span>
         <div class="toggle"></div>
       </div>
@@ -840,7 +824,7 @@
         <span class="lab"><svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 12h4l3-9 4 18 3-9h4"/></svg>Obsidian RAG</span>
         <div class="toggle on"></div>
       </div>
-      <div class="switch" data-control="web">
+      <div class="switch">
         <span class="lab"><svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><line x1="2" y1="12" x2="22" y2="12"/><path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"/></svg>Web検索</span>
         <div class="toggle"></div>
       </div>
@@ -855,8 +839,7 @@
             <svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"/><path d="M15.54 8.46a5 5 0 0 1 0 7.07"/><path d="M19.07 4.93a10 10 0 0 1 0 14.14"/></svg>
             読み上げ速度
           </span>
-          <input class="val" id="rate-val" type="text" inputmode="decimal" value="1.0x"
-                 aria-label="読み上げ速度を直接入力(0.5〜2.0)">
+          <span class="val" id="rate-val">1.0x</span>
         </div>
         <div class="rate-slider">
           <input type="range" id="rate-range" min="0.5" max="2.0" step="0.1" value="1.0"
@@ -885,8 +868,6 @@
 
   <!-- ============== BOTTOM PAD(実際の入力欄) ============== -->
   <section class="pad">
-    <!-- 14日目①: ピン留め中のファイルを示すチップ(📌 <ファイル名>について回答中 ✕) -->
-    <div id="pinned-chip-area" class="attach-row"></div>
     <!-- 既存機能: 添付チップ表示(id="attach-chips"は温存。📎登録結果・📷送信待ちチップ) -->
     <div id="attach-chips" class="attach-row"></div>
 
@@ -898,28 +879,17 @@
       </div>
 
       <div class="pad-mid">
-        <!-- 12日目追記: 📷(image-attach-btn)を廃止し📎(attach-btn)に統合。
-             file-inputのaccept/change側で画像かどうかをMIMEタイプで判定し、
-             画像なら旧📷と同じ「送信待ち」経路(addPendingImage)、それ以外は
-             従来どおりナレッジ永続登録(uploadDocument)へ振り分ける -->
-        <button id="attach-btn" class="attach-btn" title="ファイルを添付(PDF/Word/Excel/PowerPoint/コード/テキストはナレッジ登録、画像は送信するとDEEPへ強制ルーティング)">📎</button>
-        <input id="file-input" type="file" accept=".pdf,.docx,.xlsx,.pptx,.txt,.md,.markdown,.csv,.tsv,.json,.yaml,.yml,.py,.js,.jsx,.ts,.tsx,.java,.c,.h,.cpp,.hpp,.cs,.go,.rs,.rb,.php,.sh,.ps1,.sql,.html,.css,.xml,.ini,.toml,.log,image/*" hidden />
+        <!-- 既存機能: ナレッジ添付・画像添付(id/挙動は完全に温存) -->
+        <button id="attach-btn" class="attach-btn" title="PDF/Word/Excel/PowerPointをナレッジとして追加">📎</button>
+        <input id="file-input" type="file" accept=".pdf,.docx,.xlsx,.pptx" hidden />
+        <button id="image-attach-btn" class="attach-btn" title="画像を添付(送信するとDEEPへ強制ルーティングされます)">📷</button>
+        <input id="image-file-input" type="file" accept="image/*" hidden />
 
         <!-- 既存機能: マイク開始/停止/インジケータ(id/挙動は完全に温存) -->
         <div class="mic-cluster">
           <button id="start-btn" class="mic-btn" title="マイクを開始">🎙</button>
           <button id="stop-btn" class="mic-stop-btn" title="マイクを停止" disabled>⏹</button>
           <span id="mic-indicator" title="マイク入力レベル"></span>
-        </div>
-
-        <!-- 16日目 修正2: 誤送信・誤読み上げの停止ボタン。どちらもクライアント側で
-             即座に画面/音声を止めるだけ(サーバー側の生成自体は裏で完了まで動く。
-             voice_gateway.pyのWS受信ループが応答生成中はブロックされる構造上の制約に
-             ついてはノート参照)。state:thinking/speakingでない間・音声非再生中は
-             disabledのまま(押せても意味が無いため)。 -->
-        <div class="mic-cluster">
-          <button id="cancel-turn-btn" class="mic-stop-btn" title="このターンの応答を中断する" disabled>🛑</button>
-          <button id="stop-speech-btn" class="mic-stop-btn" title="読み上げだけを止める" disabled>🔇</button>
         </div>
         <span id="footer-text">未接続</span>
       </div>
@@ -964,16 +934,12 @@ const textInput = document.getElementById("text-input");
 const sendBtn = document.getElementById("send-btn");
 const attachBtn = document.getElementById("attach-btn");
 const fileInput = document.getElementById("file-input");
+const imageAttachBtn = document.getElementById("image-attach-btn");
+const imageFileInput = document.getElementById("image-file-input");
 const attachChips = document.getElementById("attach-chips");
-const pinnedChipArea = document.getElementById("pinned-chip-area");
 const knowledgeBtn = document.getElementById("knowledge-btn");
 const knowledgePanel = document.getElementById("knowledge-panel");
 const knowledgeList = document.getElementById("knowledge-list");
-const cancelTurnBtn = document.getElementById("cancel-turn-btn");
-const stopSpeechBtn = document.getElementById("stop-speech-btn");
-const newSessionBtn = document.getElementById("new-session-btn");
-const sessionSearchInput = document.getElementById("session-search-input");
-const sessionHistoryEl = document.getElementById("session-history");
 
 // --- 状態 ------------------------------------------------------------
 let ws = null;
@@ -984,158 +950,13 @@ let micProcessor = null;
 // 11日目④-1: 送信待ちの画像添付({name, base64, chip}のlist)。📎の文書添付と違い
 // DBへ永続登録せず、次に送信するテキストと一緒に1回だけWSへ乗せて送信後にクリアする。
 let pendingImages = [];
-// 13日目「直近添付ファイルを自動優先」対応: 📎の文書アップロード(uploadDocument)が
-// 成功した直後のファイル名を覚えておく変数。pendingImagesと同じ「次の送信1回だけ
-// 同梱してクリアする」方式だが、こちらはアップロード自体は即座にDBへ永続登録済みなので
-// 覚えておくのはファイル名の文字列だけでよい(base64本体を持ち回る必要が無い)。
-// 「このファイルの内容をまとめて」のようなあいまいな依頼でも、直近1ファイルの記憶へ
-// 優先的に絞り込んで検索できるようにするため(support_ai_auto_pipe.Pipe._recall()参照)。
-let lastAttachedDocument = null;
-// 14日目「添付ファイルをそのまま1ターンだけプロンプトへ埋め込む」対応。
-// /documentsのレスポンスにtext(抽出全文。DOC_INLINE_MAX_CHARS以下の場合のみ)が
-// 含まれていれば、ここへ覚えておく。lastAttachedDocumentと同じ「次の送信1回だけ
-// 同梱してクリアする」方式(sticky厳禁)。閾値超え等でtextが無い場合はnullのままとし、
-// その場合はattached_document(ファイル名)だけを送って従来どおりのRAGフォールバックに任せる。
-let lastAttachedDocumentText = null;
-// 14日目①: 📚一覧からのファイル指定(ピン留め)。解除するまで毎ターン対象になる
-// (lastAttachedDocument/lastAttachedDocumentTextの「次の1回だけ」方式を置き換える)。
-// localStorageにはファイル名のみ保存し、本文はサーバから取り直す(pinDocument参照)。
-let pinnedDocument = localStorage.getItem("pinnedDocument") || null;  // ファイル名
-let pinnedDocumentText = null;                                        // 全文(閾値超/未取得ならnull)
-let lastKnownDocs = [];  // renderKnowledgeList()の再描画(ピン状態反映)用に直近の一覧を覚えておく
-
-// 14日目②: チャット履歴の永続化(New Session・リネーム・削除・検索)。
-// chat_id(RAG記憶のキー)とsession_id(画面の会話)を一致させるため、選択中のIDを
-// localStorageへ持ち、WS接続のたびに"select_session"メッセージでサーバへ伝える(connect参照)。
-let currentSessionId = localStorage.getItem("currentSessionId") || null;
 let micMuted = false;           // 読み上げ中/推論中はtrueにしてサーバへ音声を送らない(エコー対策+10日目①)
 let currentState = "idle";      // サーバから届いた直近の state 値(10日目①: ミュート判定に使う)
 let assistantTurnEl = null;     // 現在組み立て中の応答表示<div>
 
-// --- 13日目②③: ウェイクワード「送信ゲート」+自動送信(VAD) --------------------
-// 10日目⑦で撤回した「呼ばなければ発話が消える」問題を、常時プレビュー(上記③⑦)を
-// 一切変えずに「自動送信してよいかどうか」の判定にだけウェイクワードを使うことで回避する。
-// 判定自体(表記ゆれの正規化・パターン照合)はサーバ側(wake_word.py)が行い、
-// クライアントはサーバから届く"wake_detected"を見て状態(armed/disarmed)を管理するだけ。
-const WAKE_ARM_TIMEOUT_MS = 15000;  // 呼びかけてから15秒発話が無ければ待機に戻す(呼びっぱなし防止)
-const AUTO_SEND_GRACE_MS = 1500;    // 自動送信前の猶予。この間に入力欄を触ると取り消せる
-let wakeEnabled = localStorage.getItem("wakeEnabled") === "1";
-let wakeArmed = false;
-let wakeArmTimer = null;
-let autoSendEnabled = localStorage.getItem("autoSendEnabled") === "1";
-let autoSendTimer = null;
-let lastAutoSentText = "";       // 同じ確定テキストの二重送信を防ぐ
-let webSearchEnabled = localStorage.getItem("webSearchEnabled") === "1";
-
-// --- 16日目 修正2 → 17日目 修正: 停止ボタン(応答中断/読み上げ停止) -------------
-// 16日目時点ではvoice_gateway.pyのWS受信ループが応答生成中(run_turn()のfor文)は
-// ブロックされ、ブラウザから送った「止めて」メッセージをサーバーが受け取れない
-// 構造上の制約があった。17日目でrun_turn()の消費をサーバー側の別スレッド+
-// asyncio.Queueへ切り出し、受信ループが生成中も動き続けるよう修正したため、
-// 今はcancel_turnメッセージが実際にOllamaへのストリーム接続を閉じ、応答生成
-// そのもの(GPU計算)を打ち切れる(voice_gateway.py参照)。
-// クライアント側では従来どおり「そのターンに関する残りのイベントを即座に無視する」
-// ローカルの無視フラグも引き続き使う(サーバーからの中断応答を待たず、体感を
-// 即座にする=WSの往復遅延を待たせないため)。裏でサーバーが送ってくる古いターンの
-// 末尾のstate:idleを受け取った時点で無視フラグを解除し、次のターンを正しく扱える
-// ようにする。
-let stopRequested = false;       // trueの間、token/sentence/audio/state(idle以外)/errorを無視
-let muteAudioForTurn = false;    // trueの間、audioイベントだけを無視(テキストは表示を続ける)
-
-function cancelTurn() {
-  stopRequested = true;
-  muteAudioForTurn = false; // 全停止に包含されるので個別フラグは不要
-  playbackQueue.length = 0;
-  if (currentAudio) { try { currentAudio.pause(); } catch (e) { /* noop */ } }
-  isPlaying = false;
-  currentAudio = null;
-  // 17日目: サーバー側の生成そのものを打ち切る要求を送る(上のコメント参照)。
-  // WS未接続時は何もできないので送らない(ローカルの無視フラグだけで見た目は止まる)。
-  if (ws && ws.readyState === WebSocket.OPEN) {
-    ws.send(JSON.stringify({ type: "cancel_turn" }));
-  }
-  console.log(`[cancel-turn] ${new Date().toISOString()}: 応答を中断`);
-  setState("idle");
-}
-
-function stopSpeechOnly() {
-  muteAudioForTurn = true;
-  playbackQueue.length = 0;
-  if (currentAudio) { try { currentAudio.pause(); } catch (e) { /* noop */ } }
-  isPlaying = false;
-  currentAudio = null;
-  console.log(`[stop-speech] ${new Date().toISOString()}: 読み上げを停止`);
-  updateMicMute();
-  updateTurnControlButtons();
-}
-
-function updateTurnControlButtons() {
-  cancelTurnBtn.disabled = stopRequested || !(currentState === "thinking" || currentState === "speaking");
-  stopSpeechBtn.disabled = muteAudioForTurn || !isPlaying;
-}
-
-cancelTurnBtn.addEventListener("click", cancelTurn);
-stopSpeechBtn.addEventListener("click", stopSpeechOnly);
-
-function armWake() {
-  wakeArmed = true;
-  micIndicator.classList.add("wake-armed");
-  clearTimeout(wakeArmTimer);
-  wakeArmTimer = setTimeout(disarmWake, WAKE_ARM_TIMEOUT_MS);
-}
-
-function disarmWake() {
-  wakeArmed = false;
-  micIndicator.classList.remove("wake-armed");
-  clearTimeout(wakeArmTimer);
-  wakeArmTimer = null;
-}
-
-// STTが発話を確定させる(partial_transcriptのfinal:true)たびに呼ぶ。
-// 自動送信ON・入力欄が空でない・応答中でない、の3条件を満たしたときだけ、
-// AUTO_SEND_GRACE_MS後に送信する。
-// 猶予中に入力欄をクリック/編集するとtextInputのfocus/inputリスナーが
-// autoSendTimerをclearするため、その回の自動送信は取り消される(誤送信の逃げ道)。
-//
-// 16日目 案1(15日目②からの再度の方針転換): 15日目②で「ウェイクワードON かつ
-// 未受付」のときのブロックを撤去し、自動送信をウェイクワードの状態に関係なく常に
-// 動かす方針にしていた。しかしこれは「自動送信ONにしていると、聞き取れた発話が
-// ウェイクワードなしでも3秒黙るたびに勝手に送信される」という誤送信の実害があった。
-// 相談の結果、誤送信防止を優先し、ウェイクワードONのときだけ「呼びかけて受付中
-// (wakeArmed)でなければ自動送信しない」ゲートを再度入れることにした
-// (15日目②で問題視されたUXの分かりにくさは、受付中バッジ(wake-armedクラス)による
-// 視覚フィードバックが既にあるため許容する)。ウェイクワードOFF時は従来どおり
-// 自動送信のみで動作する(退行なし)。
-function scheduleAutoSend() {
-  if (!autoSendEnabled) return;
-  if (wakeEnabled && !wakeArmed) return; // 呼びかけられていないので送らない(案1)
-  clearTimeout(autoSendTimer);
-  autoSendTimer = setTimeout(() => {
-    const text = textInput.value.trim();
-    if (!text || text === lastAutoSentText) return;
-    // 15日目③(指示2で発見・修正): 以前は`currentState !== "idle"`で判定していたが、
-    // サーバは"listening"状態を一度も送ってこないため(voice_gateway.pyが送るのは
-    // thinking/speaking/idleのみ)、接続直後〜最初の1ターンが終わるまではクライアント
-    // ローカルのcurrentStateが"listening"のまま("idle"にならない)になり、実際には
-    // 応答中でも何でもないのに自動送信が毎回黙って握りつぶされていた(再接続直後も同様)。
-    // canSendText()と同じ「thinking/speaking中だけブロックする」判定に揃えて、
-    // 意図どおり"応答中は割り込まない・それ以外は送る"にする。
-    if (!canSendText()) return; // 応答中(thinking/speaking)・WS未接続時は割り込まない
-    lastAutoSentText = text;
-    console.log(`[auto-send] ${new Date().toISOString()}: "${text}"`); // いつ何を勝手に送ったか後から追えるように
-    sendTextInput();
-    disarmWake(); // 送信したら待機へ戻す(次のターンはまた呼びかけが必要)
-  }, AUTO_SEND_GRACE_MS);
-}
-
 // --- 音声再生キュー(⑥「前の再生が終わってから次を再生する」の実装) -----------
 const playbackQueue = [];
 let isPlaying = false;
-// 15日目(指示3): 読み上げ速度バーの値。VOICEVOX側のspeedScaleを都度作り直すのではなく、
-// 再生中の<audio>のplaybackRateへ直接反映する(サーバ往復なしで即座に効く/生成済みの
-// wavをそのまま使い回せる)。範囲はスライダーと同じ0.5〜2.0倍。
-let playbackRate = 1.0;
-let currentAudio = null; // 再生速度スライダーを動かした瞬間に「今流れている音声」へも反映するため保持
 
 function enqueueAudio(wavBase64) {
   playbackQueue.push(wavBase64);
@@ -1146,18 +967,13 @@ function playNext() {
   const next = playbackQueue.shift();
   if (next === undefined) {
     isPlaying = false;
-    currentAudio = null;
     updateMicMute(); // 再生キューが空になったので、state次第で聞き取りを再開する
-    updateTurnControlButtons(); // 16日目 修正2: 再生が無くなったら読み上げ停止ボタンを無効化
     return;
   }
   isPlaying = true;
   updateMicMute(); // 読み上げ中はマイクOFF(9日目⑥仕様。エコー対策)
-  updateTurnControlButtons(); // 16日目 修正2: 再生中は読み上げ停止ボタンを有効化
 
   const audio = new Audio(`data:audio/wav;base64,${next}`);
-  audio.playbackRate = playbackRate; // 15日目(指示3): 読み上げ速度バーの現在値を毎回適用する
-  currentAudio = audio;
   audio.addEventListener("ended", playNext);
   audio.addEventListener("error", (e) => {
     logError(`audio再生に失敗: ${e?.message || e}`);
@@ -1204,7 +1020,6 @@ function setState(state) {
   stateBadge.dataset.state = state;
   updateMicMute();       // 10日目①: thinking/speaking突入・離脱のたびにミュート判定をやり直す
   updateTextInputEnabled(); // 10日目③: 音声と同じ排他制御をテキスト入力欄にも効かせる
-  updateTurnControlButtons(); // 16日目 修正2: thinking/speaking突入・離脱で応答中断ボタンも切り替える
 }
 
 // --- WebSocketメッセージ処理 ---------------------------------------------
@@ -1219,48 +1034,12 @@ function setState(state) {
 //     AIへの処理を開始したことの通知。画面上部のログへ「ユーザー発言」として表示するのは
 //     このケースだけ(sendTextInput()参照)。
 function handleMessage(msg) {
-  // 16日目 修正2: 応答中断(cancelTurn)を押した後も、voice_gateway.pyのWS受信ループが
-  // 応答生成中はブロックされる構造上、サーバーは裏でその古いターンの処理を最後まで
-  // 続けてイベントを送ってくる。ここでそれを画面/音声へ反映せず捨てる。
-  // final_transcript(新しいターンが実際に始まった合図)か、そのターンの末尾の
-  // state:idle(古いターンの後始末が終わった合図)が届いたら無視フラグを解除する。
-  if (msg.type === "final_transcript") {
-    stopRequested = false;
-    muteAudioForTurn = false;
-  } else if (msg.type === "state" && msg.value === "idle") {
-    stopRequested = false;
-    muteAudioForTurn = false;
-  } else if (stopRequested && msg.type !== "partial_transcript" && msg.type !== "wake_detected") {
-    return; // token/sentence/audio/state(thinking/speaking)/errorは無視(mic由来の2種は継続)
-  }
-
   switch (msg.type) {
     case "partial_transcript":
       // 話している最中(暫定)〜発話の区切りが確定した直後まで、常にここが呼ばれる。
       // 話し始めたら常にリアルタイムで入力欄へ反映する(ブラウザ側での編集途中に
       // 次の発話で上書きされうる点は既知のトレードオフ。10日目⑦で意図的に選んだ挙動)。
       textInput.value = msg.text;
-      // 13日目③: final(=①の3秒無音でVAD+faster-whisperが確定させた瞬間)になったら
-      // 自動送信の候補として扱う(実際に送るかどうかはscheduleAutoSend内の条件次第)。
-      if (msg.final) scheduleAutoSend();
-      break;
-
-    case "wake_detected":
-      // 13日目②: サーバ(wake_word.py)が「クレア/ねえクレア」を検出した通知。
-      // ウェイクワードトグルがONのときだけ受付中(armed)にする(OFFなら無視。
-      // 常時プレビューはこのイベントの有無に関わらず既に上のcaseで反映済み)。
-      if (wakeEnabled) {
-        armWake();
-        // 17日目「ウェイクワードの文字が次のコマンドに混入する」対応:
-        // 直前のpartial_transcriptケースで入力欄には「クレア 明日の天気は」のように
-        // ウェイクワード込みの生テキストが入っている。ここでサーバが計算済みの
-        // text_after(ウェイクワードより後ろの本文。wake_word.py参照)へ置き換えることで、
-        // 呼びかけの文字自体を入力欄の表示・以降の手動送信/自動送信の両方から除く。
-        // partial_transcriptとwake_detectedは同じfeed_audio()呼び出し内でこの順に
-        // 送られてくる(voice_gateway.pyの_check_wake_word呼び出し順)ため、
-        // 上書きの順序は保証されている。
-        textInput.value = msg.text_after;
-      }
       break;
 
     case "final_transcript":
@@ -1283,9 +1062,6 @@ function handleMessage(msg) {
       break;
 
     case "audio":
-      // 16日目 修正2: 読み上げ停止ボタン(stopSpeechOnly)で止めたターンの残り音声は
-      // 再生キューへ積まない(テキストのログ表示・状態遷移は止めずに継続させる)。
-      if (muteAudioForTurn) break;
       enqueueAudio(msg.wav_b64);
       break;
 
@@ -1295,12 +1071,6 @@ function handleMessage(msg) {
 
     case "error":
       logError(`[${msg.stage}] ${msg.message}`);
-      break;
-
-    case "session_title_updated":
-      // 14日目④: 最初のやり取りの直後、バックグラウンドで生成されたLLM要約タイトルが
-      // 届いた通知。サイドバーの次回更新(会話切替等)を待たず、その場で反映する。
-      refreshSessionList(sessionSearchInput.value.trim());
       break;
 
     default:
@@ -1429,12 +1199,6 @@ function connect() {
     reconnectAttempts = 0;
     footerText.textContent = "接続しました";
     setState("listening");
-    // 14日目②: 接続(再接続含む)のたびに、選択中のセッションIDをサーバへ伝え、
-    // chat_id(RAG記憶のキー)をsession_idへ揃える。未選択(currentSessionId===null)なら
-    // 送らず、サーバ側は従来どおりの使い捨てchat_idのままになる(=永続化されない)。
-    if (currentSessionId) {
-      ws.send(JSON.stringify({ type: "select_session", session_id: currentSessionId }));
-    }
   };
   ws.onmessage = (event) => {
     try {
@@ -1482,35 +1246,9 @@ function sendTextInput() {
   if (pendingImages.length > 0) {
     msg.images = pendingImages.map((img) => img.base64);
   }
-  // 13日目「直近添付ファイルを自動優先」対応: 直近📎アップロードしたファイル名があれば
-  // このターンだけ同梱する。pendingImagesと同じく一度送ったら使い捨て(sticky厳禁。
-  // 古いファイルへ以降の無関係な質問まで引きずられてしまうため)。
-  // 14日目①: 📚一覧でピン留め中のファイルがあれば、解除されるまで毎ターン同梱する
-  // (以前の「直後の1回だけ」方式はピン留めへ統合し、置き換えた)。
-  if (pinnedDocument) {
-    msg.attached_document = pinnedDocument;              // RAGのsource絞り込み用
-    if (pinnedDocumentText) {
-      msg.attached_document_text = pinnedDocumentText;   // 全文をそのままプロンプトへ埋め込む経路
-    }
-  } else if (lastAttachedDocument) {
-    // 後方互換: ピン留めしていない場合でも、直近アップロード分は従来どおり1回だけ同梱する
-    // (通常はuploadDocument()が成功時に自動ピン留めするため、この分岐へは来ない想定)。
-    msg.attached_document = lastAttachedDocument;
-    if (lastAttachedDocumentText) {
-      msg.attached_document_text = lastAttachedDocumentText;
-    }
-  }
-  // 13日目④: Web検索トグルON時だけ、このターンのweb_search要求をサーバへ伝える
-  // (voice_gateway.py→Pipe側でこのフラグが立っているときだけSearXNGを叩く)。
-  if (webSearchEnabled) {
-    msg.web_search = true;
-  }
   ws.send(JSON.stringify(msg));
   textInput.value = "";
   clearPendingImages();
-  // ★ pinnedDocument/pinnedDocumentTextはここでクリアしない(ピンが立っている限り毎ターン有効)
-  lastAttachedDocument = null;
-  lastAttachedDocumentText = null;
 }
 
 sendBtn.addEventListener("click", sendTextInput);
@@ -1547,13 +1285,6 @@ async function uploadDocument(file) {
     }
     chip.textContent = `📎 ${file.name} — 登録済み(${body.chunks}チャンク)`;
     appendTurn(`[ナレッジ登録] ${file.name}(${body.chunks}チャンク)`, "assistant");
-    // 14日目①: アップロード成功時に自動でピン留めする(従来の「次の1回だけ」の置き換え)。
-    // /documentsのレスポンスに抽出全文(閾値以下の場合のみ)が既に含まれているため、
-    // pinDocument()のように/documents/{filename}/textを取り直す必要はない。
-    pinnedDocument = file.name;
-    localStorage.setItem("pinnedDocument", file.name);
-    pinnedDocumentText = body.text || null;
-    renderPinnedChip();
     refreshKnowledgeList();
   } catch (e) {
     chip.classList.add("error");
@@ -1565,15 +1296,7 @@ attachBtn.addEventListener("click", () => fileInput.click());
 fileInput.addEventListener("change", () => {
   const file = fileInput.files?.[0];
   fileInput.value = ""; // 同じファイルを連続選択しても change が発火するようにリセット
-  if (!file) return;
-  // 12日目追記: 📷ボタン廃止に伴い、同じ📎(file-input)で画像も選べるようにした。
-  // MIMEタイプが image/* なら旧📷と同じ「送信待ち」経路(DEEPへ強制ルーティング)、
-  // それ以外(PDF/Word/Excel/PowerPoint)は従来どおりナレッジへ永続登録する。
-  if (file.type.startsWith("image/")) {
-    addPendingImage(file);
-  } else {
-    uploadDocument(file);
-  }
+  if (file) uploadDocument(file);
 });
 
 // --- 画像添付(11日目④-1: 送信するとDEEPへ強制ルーティングされる) -----------------
@@ -1636,12 +1359,18 @@ async function addPendingImage(file) {
   }
 }
 
+imageAttachBtn.addEventListener("click", () => imageFileInput.click());
+imageFileInput.addEventListener("change", () => {
+  const file = imageFileInput.files?.[0];
+  imageFileInput.value = ""; // 同じファイルを連続選択しても change が発火するようにリセット
+  if (file) addPendingImage(file);
+});
+
 // --- ナレッジ一覧パネル(簡易版: ファイル名・チャンク数・削除ボタンのみ) -----------
 async function refreshKnowledgeList() {
   try {
     const resp = await fetch("/documents");
     const docs = await resp.json();
-    lastKnownDocs = docs;
     renderKnowledgeList(docs);
   } catch (e) {
     knowledgeList.innerHTML = `<div id="knowledge-empty">一覧の取得に失敗しました: ${e.message || e}</div>`;
@@ -1656,15 +1385,9 @@ function renderKnowledgeList(docs) {
   }
   for (const doc of docs) {
     const item = document.createElement("div");
-    // 14日目①: クリックでピン留め/解除(「このファイルについて答えて」を成立させる中核)。
-    item.className = "knowledge-item" + (doc.filename === pinnedDocument ? " pinned" : "");
+    item.className = "knowledge-item";
     const info = document.createElement("div");
-    info.className = "info";
     info.innerHTML = `<div class="name">${doc.filename}</div><div class="meta">${doc.chunks}チャンク・${doc.date}</div>`;
-    info.addEventListener("click", () => {
-      if (doc.filename === pinnedDocument) unpinDocument();  // 再クリックで解除
-      else pinDocument(doc.filename);
-    });
     const delBtn = document.createElement("button");
     delBtn.textContent = "削除";
     delBtn.addEventListener("click", () => deleteDocument(doc.filename));
@@ -1677,65 +1400,10 @@ function renderKnowledgeList(docs) {
 async function deleteDocument(filename) {
   try {
     await fetch(`/documents/${encodeURIComponent(filename)}`, { method: "DELETE" });
-    // 14日目①: ピン留め中のファイルが削除されたら、ピンも解除する
-    // (存在しないファイルを対象にしたまま質問を続けてしまう事故を防ぐ)。
-    if (filename === pinnedDocument) unpinDocument();
     refreshKnowledgeList();
   } catch (e) {
     logError(`ナレッジの削除に失敗: ${e.message || e}`);
   }
-}
-
-// --- ピン留め(14日目①: 📚一覧からの「対象ファイルのピン留め」) -----------------
-// 「このファイルについて答えて」を成立させる中核。解除するまで毎ターン対象になる
-// (sendTextInput参照)。localStorageにはファイル名のみ保存し、本文はサーバから
-// 取り直す(リロードで消えると「なぜ効かなくなったか」が分からなくなるため)。
-async function pinDocument(filename) {
-  pinnedDocument = filename;
-  localStorage.setItem("pinnedDocument", filename);
-  pinnedDocumentText = null;
-  renderPinnedChip();
-  renderKnowledgeList(lastKnownDocs);
-  try {
-    const resp = await fetch(`/documents/${encodeURIComponent(filename)}/text`);
-    if (resp.status === 404) { unpinDocument(); return; }  // 既に削除済み
-    const body = await resp.json();
-    pinnedDocumentText = body.text || null;  // nullなら閾値超え。RAG(source絞り込み)へフォールバック
-  } catch (e) {
-    logError(`添付全文の取得に失敗(RAG検索にフォールバックします): ${e.message || e}`);
-  }
-  renderPinnedChip();
-}
-
-function unpinDocument() {
-  pinnedDocument = null;
-  pinnedDocumentText = null;
-  localStorage.removeItem("pinnedDocument");
-  renderPinnedChip();
-  renderKnowledgeList(lastKnownDocs);
-}
-
-function renderPinnedChip() {
-  pinnedChipArea.innerHTML = "";
-  if (!pinnedDocument) return;
-  const chip = document.createElement("span");
-  chip.className = "chip pinned-chip";
-  const label = document.createElement("span");
-  const mode = pinnedDocumentText ? "全文" : "検索";
-  label.textContent = `📌 ${pinnedDocument}(${mode})について回答中`;
-  const removeBtn = document.createElement("button");
-  removeBtn.textContent = "✕";
-  removeBtn.title = "ピン留めを解除する";
-  removeBtn.addEventListener("click", unpinDocument);
-  chip.appendChild(label);
-  chip.appendChild(removeBtn);
-  pinnedChipArea.appendChild(chip);
-}
-
-// ページ読み込み時にlocalStorageのピンを復元する(全文はサーバから取り直す)。
-// ファイルが既に削除されていたらpinDocument()内でunpinDocument()が呼ばれ、黙って解除される。
-if (pinnedDocument) {
-  pinDocument(pinnedDocument);
 }
 
 knowledgeBtn.addEventListener("click", () => {
@@ -1743,147 +1411,6 @@ knowledgeBtn.addEventListener("click", () => {
   knowledgePanel.classList.toggle("open", willOpen);
   if (willOpen) refreshKnowledgeList();
 });
-
-// --- チャット履歴(14日目②: New Session・リネーム・削除・検索) --------------------
-// voice_gateway.py の GET/POST/PATCH/DELETE /sessions を叩く。WebSocket上の会話フロー
-// (text_input等)とは別立てのHTTP経路(ナレッジ一覧と同じ構成)。
-
-function formatSessionMeta(iso) {
-  if (!iso) return "—";
-  // "2026-08-16T21:03:11" 形式(session_store._now_iso)から日時部分だけ簡潔に表示する
-  return iso.replace("T", " ").slice(0, 16);
-}
-
-async function refreshSessionList(query = "") {
-  try {
-    const url = query ? `/sessions?q=${encodeURIComponent(query)}` : "/sessions";
-    const resp = await fetch(url);
-    const sessions = await resp.json();
-    renderSessionList(sessions);
-  } catch (e) {
-    sessionHistoryEl.innerHTML = `<div class="hist-group">一覧の取得に失敗しました: ${e.message || e}</div>`;
-  }
-}
-
-function renderSessionList(sessions) {
-  sessionHistoryEl.innerHTML = "";
-  if (!sessions || sessions.length === 0) {
-    sessionHistoryEl.innerHTML = `<div class="hist-group">会話履歴はまだありません</div>`;
-    return;
-  }
-  for (const s of sessions) {
-    const item = document.createElement("div");
-    item.className = "hist-item" + (s.session_id === currentSessionId ? " active" : "");
-
-    const ti = document.createElement("div");
-    ti.className = "ti";
-    ti.textContent = s.title;
-    item.appendChild(ti);
-
-    const meta = document.createElement("div");
-    meta.className = "meta";
-    meta.innerHTML = `<span>${formatSessionMeta(s.updated_at)}</span>`;
-    item.appendChild(meta);
-
-    const actions = document.createElement("div");
-    actions.className = "hist-actions";
-    const renameBtn = document.createElement("button");
-    renameBtn.className = "rename";
-    renameBtn.title = "名前を変更";
-    renameBtn.textContent = "✏";
-    renameBtn.addEventListener("click", (e) => { e.stopPropagation(); renameSession(s.session_id, s.title); });
-    const deleteBtn = document.createElement("button");
-    deleteBtn.className = "delete";
-    deleteBtn.title = "削除";
-    deleteBtn.textContent = "🗑";
-    deleteBtn.addEventListener("click", (e) => { e.stopPropagation(); deleteSession(s.session_id); });
-    actions.appendChild(renameBtn);
-    actions.appendChild(deleteBtn);
-    item.appendChild(actions);
-
-    item.addEventListener("click", () => selectSession(s.session_id));
-    sessionHistoryEl.appendChild(item);
-  }
-}
-
-async function selectSession(sessionId) {
-  currentSessionId = sessionId;
-  localStorage.setItem("currentSessionId", sessionId);
-  // WS接続済みなら即座にサーバのchat_idを切り替える(未接続なら次のconnect() onopenで送られる)。
-  if (ws && ws.readyState === WebSocket.OPEN) {
-    ws.send(JSON.stringify({ type: "select_session", session_id: sessionId }));
-  }
-  try {
-    const resp = await fetch(`/sessions/${encodeURIComponent(sessionId)}`);
-    if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
-    const s = await resp.json();
-    logEl.innerHTML = "";  // 過去ログを画面へ復元する前に、今表示中のログをクリアする
-    for (const t of s.turns) appendTurn(t.text, t.role === "user" ? "user" : "assistant");
-    assistantTurnEl = null;
-  } catch (e) {
-    logError(`会話の読み込みに失敗: ${e.message || e}`);
-  }
-  refreshSessionList(sessionSearchInput.value.trim());
-}
-
-async function newSession() {
-  try {
-    const resp = await fetch("/sessions", { method: "POST" });
-    const s = await resp.json();
-    logEl.innerHTML = "";  // チャット表示をクリアする
-    assistantTurnEl = null;
-    await selectSession(s.session_id);
-  } catch (e) {
-    logError(`新規セッションの作成に失敗: ${e.message || e}`);
-  }
-}
-
-async function renameSession(sessionId, currentTitle) {
-  const newTitle = window.prompt("新しいタイトル", currentTitle);
-  if (newTitle === null || !newTitle.trim()) return;  // キャンセル/空文字は無視
-  try {
-    await fetch(`/sessions/${encodeURIComponent(sessionId)}`, {
-      method: "PATCH",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ title: newTitle.trim() }),
-    });
-    refreshSessionList(sessionSearchInput.value.trim());
-  } catch (e) {
-    logError(`リネームに失敗: ${e.message || e}`);
-  }
-}
-
-async function deleteSession(sessionId) {
-  if (!window.confirm("この会話を削除しますか?(元に戻せません)")) return;
-  try {
-    await fetch(`/sessions/${encodeURIComponent(sessionId)}`, { method: "DELETE" });
-    if (sessionId === currentSessionId) {
-      // 表示中のセッション自体を消した場合は、選択状態も解除する(次のNew Session/選択待ち)。
-      currentSessionId = null;
-      localStorage.removeItem("currentSessionId");
-      logEl.innerHTML = "";
-    }
-    refreshSessionList(sessionSearchInput.value.trim());
-  } catch (e) {
-    logError(`削除に失敗: ${e.message || e}`);
-  }
-}
-
-newSessionBtn.addEventListener("click", newSession);
-
-let sessionSearchTimer = null;
-sessionSearchInput.addEventListener("input", () => {
-  // 検索のたびに即fetchせず、少し待ってから叩く(連続入力での無駄な通信を減らす)
-  clearTimeout(sessionSearchTimer);
-  sessionSearchTimer = setTimeout(() => refreshSessionList(sessionSearchInput.value.trim()), 200);
-});
-
-// ページ読み込み時にセッション一覧を描画する。リロード時は同じセッションへ復帰する
-// (currentSessionIdがlocalStorageに残っていれば、その過去ログも復元する)。
-refreshSessionList();
-if (currentSessionId) {
-  selectSession(currentSessionId);
-}
 
 // --- 起動 -----------------------------------------------------------------
 startBtn.addEventListener("click", async () => {
@@ -1956,45 +1483,12 @@ document.querySelectorAll('.model-opt').forEach(function(opt){
   });
 });
 
-// 13日目③: Controlsパネルのスイッチ。data-control属性を持つもの(wake/autosend/web)は
-// localStorageへ永続化しつつ実処理へ配線する。それ以外(Obsidian RAG/思考モード等)は
-// 12日目時点のまま見た目のトグルのみ(思考モードの機能化は13日目のスコープ外)。
+// Controlsパネルのスイッチ(見た目の切り替えのみ。機能未接続)
 document.querySelectorAll('.rightpanel .switch .toggle').forEach(function(sw){
-  const switchEl = sw.closest('.switch');
-  const key = switchEl ? switchEl.dataset.control : undefined;
-  sw.addEventListener('click', function(){
-    const on = sw.classList.toggle('on');
-    if (key === 'wake') {
-      wakeEnabled = on;
-      localStorage.setItem('wakeEnabled', on ? '1' : '0');
-      if (!on) disarmWake(); // OFFにしたら受付中も即解除
-    } else if (key === 'autosend') {
-      autoSendEnabled = on;
-      localStorage.setItem('autoSendEnabled', on ? '1' : '0');
-      if (!on) clearTimeout(autoSendTimer);
-    } else if (key === 'web') {
-      webSearchEnabled = on;
-      localStorage.setItem('webSearchEnabled', on ? '1' : '0');
-    }
-  });
+  sw.addEventListener('click', function(){ sw.classList.toggle('on'); });
 });
 
-// 13日目②③: ページ読み込み時にlocalStorageの設定をトグルの見た目へ反映する
-// (リロードのたびに設定し直さなくてよいようにする)。
-(function restoreControlToggles(){
-  const map = { wake: wakeEnabled, autosend: autoSendEnabled, web: webSearchEnabled };
-  Object.keys(map).forEach(function(key){
-    const el = document.querySelector('.rightpanel .switch[data-control="' + key + '"] .toggle');
-    if (el) el.classList.toggle('on', map[key]);
-  });
-})();
-
-// 13日目③: 自動送信の猶予中にユーザーが入力欄を触ったら、その回の自動送信は取り消す
-// (誤送信の逃げ道。10日目⑦残課題「編集中に上書きされる」問題と同種の事故を防ぐ)。
-textInput.addEventListener('focus', () => clearTimeout(autoSendTimer));
-textInput.addEventListener('input', () => clearTimeout(autoSendTimer));
-
-// === 読み上げ速度スライダー(15日目・指示3で機能化。再生中<audio>のplaybackRateへ反映) ===
+// === 読み上げ速度スライダー(見た目のみ。VOICEVOX speedScaleへの反映は未実装) ===
 (function rateSlider(){
   const range = document.getElementById('rate-range');
   const val = document.getElementById('rate-val');
@@ -2002,46 +1496,23 @@ textInput.addEventListener('input', () => clearTimeout(autoSendTimer));
   if (!range || !val) return;
 
   function apply(rate){
-    if (!Number.isFinite(rate)) return; // 15日目②: キーボード入力が数値になっていない間は無視
     const r = Math.min(2.0, Math.max(0.5, rate));
     range.value = r;
     const pct = ((r - range.min) / (range.max - range.min)) * 100;
     range.style.setProperty('--rate-pct', pct.toFixed(1) + '%');
-    val.value = r.toFixed(1) + 'x';
+    val.textContent = r.toFixed(1) + 'x';
     ticks.forEach(function(t){
       t.classList.toggle('sel', Math.abs(parseFloat(t.dataset.rate) - r) < 0.001);
     });
-    // 指示3: VOICEVOX側のspeedScaleを都度作り直す(=サーバ往復・再合成)方式ではなく、
-    // ブラウザの<audio>.playbackRateへ直接反映する。次に再生される音声はplayNext()内で
-    // 参照しているplaybackRateから自動的に効くが、「今まさに再生中」の音声にも
-    // 即座に反映されるようcurrentAudioがあればそちらも直接書き換える。
-    playbackRate = r;
-    if (currentAudio) currentAudio.playbackRate = r;
-    localStorage.setItem('playbackRate', String(r));
+    // TODO(実装時): voice_gateway.py 側へ speech_rate をWS経由で送信し、
+    // VOICEVOXの speedScale パラメータへ反映する(12日目②残課題)
   }
 
   range.addEventListener('input', function(){ apply(parseFloat(range.value)); });
   ticks.forEach(function(t){
     t.addEventListener('click', function(){ apply(parseFloat(t.dataset.rate)); });
   });
-
-  // 15日目②(指示3): 「1.0x」欄をキーボードでも編集できるようにする。
-  // 入力中(まだ確定していない)は値を書き換えず、Enter/フォーカスアウトで確定させる。
-  // "1.2" でも "1.2x" でも受け付ける("x"は末尾に付いていても剥がしてから数値化)。
-  function commitTypedRate(){
-    const parsed = parseFloat(val.value.replace(/x$/i, '').trim());
-    apply(Number.isFinite(parsed) ? parsed : parseFloat(range.value)); // 不正入力時は直前の値へ戻す
-  }
-  val.addEventListener('keydown', function(e){
-    if (e.key === 'Enter') { e.preventDefault(); commitTypedRate(); val.blur(); }
-    if (e.key === 'Escape') { e.preventDefault(); apply(parseFloat(range.value)); val.blur(); }
-  });
-  val.addEventListener('blur', commitTypedRate);
-  val.addEventListener('focus', function(){ val.select(); });
-
-  // 指示3: リロードしても前回の速度設定を維持する(トグル類と同じlocalStorage方式)
-  const savedRate = parseFloat(localStorage.getItem('playbackRate'));
-  apply(Number.isFinite(savedRate) ? savedRate : parseFloat(range.value));
+  apply(parseFloat(range.value));
 })();
 </script>
 </body>

@@ -28,10 +28,17 @@ from fakes import NoopMemoryStore  # noqa: E402
 from ollama_client import OllamaError  # noqa: E402
 
 
-def make_body(text: str, chat_id: str = "chat-1", images: list[str] | None = None) -> dict:
+def make_body(
+    text: str,
+    chat_id: str = "chat-1",
+    images: list[str] | None = None,
+    attached_document: str | None = None,
+) -> dict:
     message: dict = {"role": "user", "content": text}
     if images:
         message["images"] = images
+    if attached_document:
+        message["attached_document"] = attached_document
     return {
         "chat_id": chat_id,
         "messages": [message],
@@ -262,6 +269,97 @@ class TestSupportAiAutoPipe(unittest.TestCase):
         self.assertIn("[route: DEEP]", result)
         self.assertEqual(recorder[0]["model"], "gemma4:26b")
         self.assertEqual(recorder[0]["images"], ["QUJD"])
+
+    def test_image_attachment_adds_table_format_hint_non_streaming(self):
+        # 12日目追記→13日目改訂: 画像添付ターンでは、手書き表などをMarkdownのパイプ表
+        # (Obsidianノートへそのままコピペしたときに罫線付きの表として描画される形式)で
+        # 出力するよう促すsystemプロンプトが足される。
+        router.call_phi4 = lambda system_prompt, user_text: '{"route": "FAST"}'
+
+        recorder: list = []
+
+        def fake_generate(model, prompt, **kwargs):
+            recorder.append(kwargs)
+            return "回答"
+
+        support_ai_auto_pipe.generate = fake_generate
+
+        pipe = support_ai_auto_pipe.Pipe()
+        pipe.valves.streaming_mode = "off"
+        pipe.pipe(make_body("この表を読み取って", images=["QUJD"]))
+
+        self.assertIn(support_ai_auto_pipe.TABLE_FORMAT_SYSTEM_PROMPT, recorder[0]["system"])
+
+    def test_no_image_does_not_add_table_format_hint_non_streaming(self):
+        # 画像が無い通常ターンにまでTABLE_FORMAT_SYSTEM_PROMPTを付けると、
+        # ①-3で短縮した応答時間に無駄なプロンプト処理コストが乗ってしまうため付けない。
+        router.call_phi4 = lambda system_prompt, user_text: '{"route": "FAST"}'
+
+        recorder: list = []
+
+        def fake_generate(model, prompt, **kwargs):
+            recorder.append(kwargs)
+            return "回答"
+
+        support_ai_auto_pipe.generate = fake_generate
+
+        pipe = support_ai_auto_pipe.Pipe()
+        pipe.valves.streaming_mode = "off"
+        pipe.pipe(make_body("こんにちは"))
+
+        self.assertIsNone(recorder[0]["system"])
+
+    def test_deep_route_non_streaming_call_disables_thinking(self):
+        # 12日目①-2で判明した実運用遅延の根本原因対応。非ストリーミング経路
+        # (streaming_mode="off"等)でも、DEEP(gemma4:26b)呼び出しに`think=False`が
+        # 渡ることを確認する(直接A/Bテストでthink未指定=32.38秒→think=Falseで1.23秒)。
+        def fake_call_phi4(system_prompt, user_text):
+            return '{"route": "DEEP"}'
+
+        recorder: list = []
+
+        def fake_generate(model, prompt, **kwargs):
+            recorder.append({"model": model, **kwargs})
+            return "回答本文"
+
+        router.call_phi4 = fake_call_phi4
+        support_ai_auto_pipe.generate = fake_generate
+
+        pipe = support_ai_auto_pipe.Pipe()
+        pipe.valves.streaming_mode = "off"
+        pipe.pipe(make_body("来月の旅行の計画を立てて"))
+
+        self.assertEqual(recorder[0]["think"], False)
+
+    def test_code_route_call_disables_thinking(self):
+        def fake_call_phi4(system_prompt, user_text):
+            return '{"route": "CODE"}'
+
+        recorder: list = []
+
+        def fake_generate(model, prompt, **kwargs):
+            recorder.append({"model": model, **kwargs})
+            return "回答本文"
+
+        router.call_phi4 = fake_call_phi4
+        support_ai_auto_pipe.generate = fake_generate
+
+        pipe = support_ai_auto_pipe.Pipe()
+        pipe.pipe(make_body("このスクリプトのバグを直して実装しといて"))
+
+        self.assertEqual(recorder[0]["think"], False)
+
+    def test_extract_last_user_attached_document_reads_convention_key(self):
+        # 13日目「直近添付ファイルを自動優先」対応: static/index.htmlが次のtext_input送信に
+        # 乗せてくる独自convention("attached_document"キー)を読み取れること。
+        body = make_body("このファイルの内容を要約して", attached_document="workout.pdf")
+        self.assertEqual(
+            support_ai_auto_pipe.Pipe._extract_last_user_attached_document(body), "workout.pdf"
+        )
+
+    def test_extract_last_user_attached_document_returns_none_when_absent(self):
+        body = make_body("こんにちは")
+        self.assertIsNone(support_ai_auto_pipe.Pipe._extract_last_user_attached_document(body))
 
     def test_task_call_bypasses_routing_and_does_not_poison_session(self):
         # 6日目⑧-2「マツコ問題」の根本原因の再発防止テスト。

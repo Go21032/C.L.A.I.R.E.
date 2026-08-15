@@ -1,10 +1,15 @@
-"""PDF/Word/Excel/PowerPointファイルをテキスト抽出し、ノート取り込み(ingest_notes.py)と
-同じ経路(chunker→embed→LanceDB)で「ナレッジ」として永続登録する。
+"""PDF/Word/Excel/PowerPoint、およびPython/JSON/CSV等のテキスト/コード系ファイルを
+テキスト抽出し、ノート取り込み(ingest_notes.py)と同じ経路(chunker→embed→LanceDB)で
+「ナレッジ」として永続登録する。
 
 11日目ノート(サポートAI作製計画/11日目Web検索対応・UIデザイン確定・マルチモーダル対応調査.md)④の
 改善策のうち、実装コストの低いPDF/Word/Excel/PowerPoint対応(画像は対象外。同ノートに追記した
 「画像対応の検討事項」参照)。voice_gateway.pyの`POST/GET /documents`・`DELETE /documents/{filename}`
 から呼ばれる想定(CLIからも単体で使える)。
+
+12日目追記: 📷ボタンを📎に統合したのに合わせ、TEXT_EXTENSIONS(.py/.json/.csv/.md等)を
+追加し、コード/テキスト系ファイルもそのままナレッジ登録できるようにした(画像は引き続き
+このモジュールの対象外。静的index.htmlの📎ボタン側でMIMEタイプ判定して振り分ける)。
 
 source規約: `f"doc:{filename}"`(ingest_notes.pyの`f"note:{path}"`・memory_store.append_turnの
 `f"chat:{chat_id}"`に倣う)。`role="document"` / `route="DOCUMENT"`で登録する。同名ファイルの
@@ -31,7 +36,19 @@ import chunker
 # memory_store は config.yaml(db_path等)をimport時に読み込むため、ingest_notes.py と同じ理由で
 # ここではトップレベルimportせず、実際にDBへ触る関数の内部で遅延importする。
 
-SUPPORTED_EXTENSIONS = {".pdf", ".docx", ".xlsx", ".pptx"}
+OFFICE_EXTENSIONS = {".pdf", ".docx", ".xlsx", ".pptx"}
+
+# 12日目追記: 📷ボタン統合(画像は別経路)に合わせて、📎から
+# コード/テキスト系ファイルも添付できるようにした。抽出はバイト列を
+# デコードするだけ(見出し等は付けず、そのまま1ファイル分のテキストとして扱う)。
+TEXT_EXTENSIONS = {
+    ".txt", ".md", ".markdown", ".csv", ".tsv", ".json", ".yaml", ".yml",
+    ".py", ".js", ".jsx", ".ts", ".tsx", ".java", ".c", ".h", ".cpp", ".hpp",
+    ".cs", ".go", ".rs", ".rb", ".php", ".sh", ".ps1", ".sql", ".html", ".css",
+    ".xml", ".ini", ".toml", ".log",
+}
+
+SUPPORTED_EXTENSIONS = OFFICE_EXTENSIONS | TEXT_EXTENSIONS
 DOC_SOURCE_PREFIX = "doc:"
 
 
@@ -50,9 +67,23 @@ def extract_text(filename: str, data: bytes) -> str:
         return _extract_xlsx(data)
     if suffix == ".pptx":
         return _extract_pptx(data)
+    if suffix in TEXT_EXTENSIONS:
+        return _extract_plain_text(data)
     raise UnsupportedFileTypeError(
         f"未対応のファイル形式です: {suffix or '(拡張子なし)'}(対応: {sorted(SUPPORTED_EXTENSIONS)})"
     )
+
+
+def _extract_plain_text(data: bytes) -> str:
+    """テキスト/コード系ファイルをデコードする。UTF-8を優先し、Windowsのメモ帳等で
+    保存されたShift_JIS(CP932)系のファイルにもフォールバックする。どちらでも
+    デコードできない場合は文字化けを許容してでも中身を落とさない(errors="replace")。"""
+    for encoding in ("utf-8-sig", "utf-8", "cp932"):
+        try:
+            return data.decode(encoding)
+        except UnicodeDecodeError:
+            continue
+    return data.decode("utf-8", errors="replace")
 
 
 def _extract_pdf(data: bytes) -> str:
@@ -115,14 +146,20 @@ def _chunks_for_text(text: str) -> list[str]:
     return [c.strip() for c in chunker.chunk_markdown(text) if c.strip()]
 
 
-def ingest_document(filename: str, data: bytes) -> dict:
+def ingest_document(filename: str, data: bytes, *, text: str | None = None) -> dict:
     """アップロードされたファイルを抽出→チャンク化→LanceDBへ永続登録する(upsert)。
+
+    text: 呼び出し元(voice_gateway.pyのupload_document())が、レスポンスへ含める
+    かどうか(DOC_INLINE_MAX_CHARS判定)のために先にextract_text()を呼んでいる場合、
+    ここで二重に抽出しないよう渡せる。Noneのまま(=従来どおりの呼び出し方)なら
+    ここでextract_text()を呼ぶ(後方互換)。
 
     戻り値: {"filename": str, "chunks": int}
     """
     import memory_store  # 遅延import(理由は冒頭コメント参照)
 
-    text = extract_text(filename, data)
+    if text is None:
+        text = extract_text(filename, data)
     chunks = _chunks_for_text(text)
 
     source = f"{DOC_SOURCE_PREFIX}{filename}"
@@ -172,6 +209,32 @@ def list_documents() -> list[dict]:
         for _, row in grouped.iterrows()
     ]
     return sorted(results, key=lambda r: r["date"], reverse=True)
+
+
+def get_document_text(filename: str) -> str | None:
+    """登録済みファイルの抽出全文を、チャンクを連結して復元する。
+
+    14日目①: ピン留めしたファイルの全文をクライアントが取り直すためのI/F。
+    ingest_document()はチャンク化してLanceDBへ登録するだけで、全文を読み戻す
+    経路がなかった(ノート⓪-3参照)。ここではノート内の検討どおり、まず
+    「チャンクを連結して復元する」(方針1)で実装する。チャンクはingest_document()内で
+    1回のtable.add()にまとめて追加されるため、to_pandas()の行順は概ね挿入順を保つ。
+    オーバーラップ(chunk_markdown内)による重複が実害になった場合は、方針2
+    (アップロード時に抽出全文を別途保存する)へ切り替える。
+
+    未登録のファイル名にはNoneを返す(呼び出し元はこれを404として扱う)。
+    """
+    import memory_store  # 遅延import
+
+    table = memory_store._table()
+    if table.count_rows() == 0:
+        return None
+    df = table.to_pandas()
+    source = f"{DOC_SOURCE_PREFIX}{filename}"
+    rows = df[df["source"] == source]
+    if rows.empty:
+        return None
+    return "\n\n".join(rows["content"].tolist())
 
 
 def delete_document(filename: str) -> int:

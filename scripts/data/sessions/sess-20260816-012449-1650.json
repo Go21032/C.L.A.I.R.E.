@@ -1,0 +1,33 @@
+{
+  "session_id": "sess-20260816-012449-1650",
+  "title": "長い資料",
+  "created_at": "2026-08-16T01:24:49.927905",
+  "updated_at": "2026-08-16T01:27:20.242775",
+  "title_is_custom": true,
+  "turns": [
+    {
+      "role": "user",
+      "text": "この論文を300文字以内でようやくして",
+      "route": "",
+      "ts": "2026-08-16T01:26:17.210793"
+    },
+    {
+      "role": "assistant",
+      "text": "[route: FAST]\n申し訳ありませんが、要約したい論文の本文や主要な内容が提示されていないため、300文字以内でまとめることができません。  \n論文のタイトル、著者、掲載誌、あるいは本文の抜粋を共有いただければ、適切に要約いたします。\n\n---\n出典:\n[1] ChatGPTで論文要約する方法！メリットや要約のポイントも合わせ ... - https://irsc.jp/blog/summarizingthepaper\n[2] 文章を生成aiで自動要約します (無料) - https://ai-tool.userlocal.jp/chatgpt-digest\n[3] ChatGPTで文章を要約する方法｜おすすめツールの紹介 - https://www.ricoh.co.jp/magazines/column/trn-chatgpt-text-summary/\n[4] AIで論文を要約レポートに｜大学生向け5ツールと文字数別テンプレ - https://prism-ai.jp/news/report-ai-youyaku/\n[5] 【2026年8月最新】ChatGPTで論文・PDF・長文を要約する方法 - https://genai-ai.co.jp/ai-kanri/blog/chatgpt-doc-summary/",
+      "route": "",
+      "ts": "2026-08-16T01:26:29.817276"
+    },
+    {
+      "role": "user",
+      "text": "ではこの卒論の資料を300文字以内で要約してくれ",
+      "route": "",
+      "ts": "2026-08-16T01:27:03.104165"
+    },
+    {
+      "role": "assistant",
+      "text": "[route: FAST]\n申し訳ありませんが、卒論の資料自体が提示されていないため、300文字以内で要約することができません。資料を共有いただければ、指定の文字数で要約いたします。\n\n---\n出典:\n[1] 論文要約の書き方がわからない方必見!良い要約の具体例と ... - https://pdf.wondershare.jp/pdf-ai/how-to-write-paper-summary.html\n[2] 学術論文の要約作成ガイド：効果的な書き方と具体例を徹底 ... - https://gakulab.blog/%E5%AD%A6%E8%A1%93%E8%AB%96%E6%96%87%E3%81%AE%E8%A6%81%E7%B4%84%E4%BD%9C%E6%88%90%E3%82%AC%E3%82%A4%E3%83%89%EF%BC%9A%E5%8A%B9%E6%9E%9C%E7%9A%84%E3%81%AA%E6%9B%B8%E3%81%8D%E6%96%B9%E3%81%A8%E5%85%B7/\n[3] 無料の要約生成ツール｜研究論文を瞬時に要約 - Musely - https://musely.ai/ja/tools/abstract-generator\n[4] おすすめの論文要約AIツール5選!誰でもカンタンに論文を読める! - https://pdf.wondershare.jp/ranking/best-ai-summarization-tools.html\n[5] 長文を一瞬で要約するChatGPTプロンプト【コピペOK・実例付き ... - https://note.com/ai_nagi_/n/ne0d48274e4f4",
+      "route": "",
+      "ts": "2026-08-16T01:27:20.242775"
+    }
+  ]
+}

@@ -99,6 +99,32 @@ SAMPLES = [
 ]
 
 
+TEST_SOURCE_DOC_A = "doc:TEST_MEMORY_STORE_A.pdf"
+TEST_SOURCE_DOC_B = "doc:TEST_MEMORY_STORE_B.pdf"
+
+
+def _append_turn_with_source(source: str, text: str) -> None:
+    """append_turn()はsource='chat:{chat_id}'固定で登録するため、13日目
+    「直近添付ファイルを自動優先」対応(source絞り込み)の確認用に、
+    doc_ingest.ingest_document()と同じ`source`列を直接指定して1行登録する
+    最小ヘルパー。本番のingest_document()相当の処理を丸ごと呼ぶ必要はない
+    (このテストはretrieve()のsource絞り込みだけを見たいため)。"""
+    import uuid
+    from datetime import datetime
+
+    row = {
+        "id": str(uuid.uuid4()),
+        "date": datetime.now().isoformat(timespec="seconds"),
+        "source": source,
+        "role": "document",
+        "route": "DOCUMENT",
+        "topic": "",
+        "content": text,
+        "vector": memory_store.embed(text, is_query=False),
+    }
+    memory_store._table().add([row])
+
+
 def test_memory_store() -> None:
     _section("2. memory_store.py の確認")
 
@@ -156,6 +182,20 @@ def test_memory_store() -> None:
         print(f"  max_distance={threshold}: 採用{n_used}件 / 空文字={ctx == ''}")
     print("  OK: max_distanceを厳しくするほど採用件数が減ることを確認")
 
+    # --- retrieve() のsource絞り込み確認(13日目: 直近添付ファイル自動優先) ---
+    _section("2-4. source絞り込み(直近添付ファイル自動優先)")
+    _append_turn_with_source(TEST_SOURCE_DOC_A, "このファイルAには筋トレの記録が書かれています。")
+    _append_turn_with_source(TEST_SOURCE_DOC_B, "このファイルBには読書メモが書かれています。")
+    hits_doc_a = memory_store.retrieve("この資料の内容を要約して", limit=5, source=TEST_SOURCE_DOC_A)
+    print(f"source='{TEST_SOURCE_DOC_A}'で絞り込んだ結果: {len(hits_doc_a)}件")
+    for h in hits_doc_a:
+        print(f"  distance={h['_distance']:.4f} content={h['content']}")
+    assert len(hits_doc_a) >= 1, "sourceで絞り込んだファイルAの記憶がヒットしなかった"
+    assert all("ファイルA" in h["content"] for h in hits_doc_a), (
+        "source絞り込みが効いておらず、ファイルB由来の記憶が混じっている"
+    )
+    print("  OK: sourceで指定した1ファイルの記憶だけに絞り込めている")
+
 
 # ---------------------------------------------------------------------------
 # 3. 後片付け: このスクリプトが登録したテストデータだけを削除する
@@ -166,9 +206,12 @@ def cleanup() -> None:
     table = memory_store._table()
     before = table.count_rows()
     table.delete(f"route LIKE '{TEST_ROUTE}%'")
+    # 2-4で登録したsource='doc:TEST_MEMORY_STORE...'の行はroute='DOCUMENT'固定のため、
+    # 上のroute LIKE削除では消えない。source側でも別途削除する。
+    table.delete("source LIKE 'doc:TEST_MEMORY_STORE%'")
     after = table.count_rows()
-    print(f"route LIKE '{TEST_ROUTE}%' を削除: {before}件 → {after}件"
-          f"(削除数: {before - after})")
+    print(f"route LIKE '{TEST_ROUTE}%' / source LIKE 'doc:TEST_MEMORY_STORE%' を削除: "
+          f"{before}件 → {after}件(削除数: {before - after})")
     print("※ 5日目からの既存データ(route='TEST')には触れていない")
 
 

@@ -46,6 +46,12 @@ TTS(`tts_adapter.synthesize()`)を繋ぐ接着剤。**8日目の「読み上げ�
     デバッグ接頭辞を先頭に付けるため、これを外さないと毎回
     「かっこルートファストかっことじ」と読み上げられる。
   - コードブロック(```で囲まれた部分)は読み上げ対象から除外する。
+  - 括弧書き(全角「（）」/半角「()」)の中身は読み上げない。「スパイダーマン：
+    ブランド・ニュー・デイ(Spider-Man: Brand New Day)」のように、直前の内容の
+    原語表記/補足を括弧で添えている場合、そのまま読み上げると同じ内容を2回言う形に
+    なりくどいため(19日目 修正)。リンク記法`[label](url)`の`(url)`部分は、この処理より
+    先に`_RE_LINK`/`_RE_IMAGE`で除去済みのため影響しない。既知の制約として、入れ子の
+    括弧や、コード片(`` `func(x, y)` ``)内の`()`もまとめて除去される(YAGNIで許容)。
 """
 
 from __future__ import annotations
@@ -85,6 +91,11 @@ _RE_ITALIC = re.compile(r"\*([^*\n]+)\*")
 # `**`が対になっていない断片が残り、上のペア用の正規表現では落とせない。
 # 対になっていない`**`/`__`は読み上げても意味が無いので最後にまとめて落とす。
 _RE_STRAY_EMPHASIS = re.compile(r"\*\*|__")
+# 19日目 修正: 括弧書き(全角/半角)の中身は読み上げない(原語併記等が二重読みになるため)。
+# リンク/画像の`(url)`は、この正規表現が走る前に_RE_LINK/_RE_IMAGEで既に除去済み。
+# 入れ子の括弧には対応しない(単純な非入れ子ケースのみをカバーするYAGNI実装)。
+_RE_PAREN_FULLWIDTH = re.compile(r"（[^（）]*）")
+_RE_PAREN_HALFWIDTH = re.compile(r"\([^()]*\)")
 _RE_WHITESPACE = re.compile(r"[ \t\r\n　]+")
 
 # 文を結合する際、直前の文がこれらで終わっていれば読点を補わない。
@@ -280,6 +291,8 @@ class SentenceSplitter:
         text = _RE_BOLD_UNDERSCORE.sub(r"\1", text)
         text = _RE_ITALIC.sub(r"\1", text)
         text = _RE_STRAY_EMPHASIS.sub("", text)
+        text = _RE_PAREN_FULLWIDTH.sub("", text)
+        text = _RE_PAREN_HALFWIDTH.sub("", text)
         text = _RE_WHITESPACE.sub(" ", text)
         return text.strip()
 

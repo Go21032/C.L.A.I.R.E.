@@ -72,6 +72,7 @@ if str(ROUTER_SCRIPTS_DIR) not in sys.path:
 
 import code_executor  # noqa: E402
 import router  # noqa: E402
+import web_search  # noqa: E402 - 14日目: 13日目④で部品実装のみ区切っていたWeb検索を結線する
 from ollama_client import OllamaError, generate, generate_stream  # noqa: E402
 
 # 6日目ノート(サポートAI作製計画/6日目RAG記憶レイヤーのPipe組み込み.md)④⑤:
@@ -91,6 +92,23 @@ except Exception as e:  # HDD未接続・依存パッケージ未導入等、あ
     print(
         f"[claire] 記憶レイヤー(memory_store)の読み込みに失敗したため、記憶機能を無効化して起動します: {e}"
     )
+
+# 13日目「直近添付ファイルを自動優先」対応: rag_memory/doc_ingest.pyが
+# `f"doc:{filename}"`の形でLanceDBのsource列へ登録する接頭辞と同じ値。
+# doc_ingest.py自体をimportすると依存が増えるため、値だけをここでも定義しておく
+# (doc_ingest.DOC_SOURCE_PREFIXと常に一致させること)。
+DOC_SOURCE_PREFIX = "doc:"
+
+# 14日目「添付ファイルをそのまま1ターンだけプロンプトへ埋め込む」対応。
+# voice_gateway.DOC_INLINE_MAX_CHARSと同じ考え方の閾値だが、FastAPI層
+# (voice_gateway.py)とPipe層(このファイル)は互いに直接importし合っていない
+# 別モジュールのため、値をここでも独立に持つ。本来はクライアント
+# (static/index.html)がアップロード時点でこの閾値以下と判定した場合にしか
+# attached_document_textを送ってこないはずだが、クライアント側の改変・バグで
+# 想定より大きなテキストが届いてもプロンプト予算(コンテキスト長・VRAM)を
+# 壊さないための最終防衛ラインとして、ここでも同じ値でハードトランケートする
+# (voice_gateway.DOC_INLINE_MAX_CHARSと値を合わせること)。
+ATTACHED_DOCUMENT_TEXT_MAX_CHARS = 20000
 
 # code_executor.WORKSPACE_DIRのエイリアス。テストからこのモジュール変数を
 # 直接差し替えられるように、code_executor.WORKSPACE_DIRを直接参照せず
@@ -121,6 +139,35 @@ CODE_ACTION_SYSTEM_PROMPT = """あなたはユーザーのコーディング依�
   ACTIONブロックは使わず、通常の説明文だけで回答すること。
 - ACTIONブロックは1回answerにつき1つだけ出力すること。
 """
+
+# 12日目追記→13日目改訂: 画像添付(force_route=DEEP)時に、手書きワークアウト表などの
+# 画像を「表にして」と頼まれた際の出力形式。当初はこのアプリの画面(#logはtextContent+
+# white-space:pre-wrapで生テキストをそのまま表示するだけでMarkdownを描画しない)向けに
+# TSV(タブ区切り)で出させていたが、実際にはExcel/スプレッドシートよりもObsidianの
+# ノートへコピペして使いたいという要望が実機で判明した。ObsidianはMarkdownを描画する
+# ため、TSVのままだと罫線の無いただの文章になってしまう。そのため、Markdownのパイプ表
+# (| a | b |と区切り行 |---|---|)で出力させる方針に変更した。このアプリ自身の画面上では
+# パイプ文字がそのまま見えてやや不格好になるが、Obsidianへ貼り付けたときに正しい表として
+# 描画されることを優先する(ユーザーの明示的な判断)。画像添付ターンにのみ付与する
+# (通常会話にまで常時付与すると、①-3でようやく短縮した応答時間に無駄なプロンプト処理
+# コストが乗るため)。
+TABLE_FORMAT_SYSTEM_PROMPT = """表形式のデータ(ワークアウト記録・一覧・比較表など)を
+作成する場合は、タブ区切りテキストや```で囲んだコードブロックは使わず、Markdownの
+パイプ表として出力してください。1行目に日本語の列見出しを入れた
+「| 見出しA | 見出しB |」の形式の行を書き、その直下に区切り行
+「|---|---|」(列数に合わせてハイフンの列を並べる)を必ず入れ、以降の行に
+「| 値1 | 値2 |」の形式でレコードを1行ずつ並べてください。
+これはObsidianのノートへそのままコピペして貼り付けたときに、罫線付きの表として
+正しく描画されるようにするためです。表以外の説明文は普段どおり自然な日本語の
+文章で書いてください。
+"""
+
+
+def _combine_system_prompts(*prompts: str | None) -> str | None:
+    """空文字/Noneを除いて改行2つで連結する。全部空ならNoneを返す(呼び出し元の
+    generate/generate_streamは system=None を「文脈なし」として扱うため)。"""
+    parts = [p for p in prompts if p]
+    return "\n\n".join(parts) if parts else None
 
 
 class Pipe:
@@ -154,6 +201,16 @@ class Pipe:
             "(Open WebUIのバージョンによってはstreamフラグが渡って来ないため、その場合の逃げ道) / "
             '"off"=8日目までと同じ全文一括応答に戻す(不具合時の切り分け用)。'
             "CODE・CLARIFY・タスク呼び出しは設定に関わらず常に全文応答のまま。",
+        )
+        web_search_enabled: bool = Field(
+            default=True,
+            description="Web検索(SearXNG経由、web_search.py)を利用するかどうか。"
+            "OFFにするとクライアントのWeb検索トグルがONでも検索を一切行わない"
+            "(memory_enabledと同じ、不具合時の切り分け用のキルスイッチ)。",
+        )
+        web_search_limit: int = Field(
+            default=5,
+            description="Web検索1回あたりに取得する結果件数の上限。",
         )
 
     def __init__(self) -> None:
@@ -230,6 +287,57 @@ class Pipe:
                     return [img for img in images if isinstance(img, str) and img]
                 return []
         return []
+
+    @staticmethod
+    def _extract_last_user_attached_document(body: dict) -> str | None:
+        """最後のuserメッセージに添付された文書のファイル名を取り出す。
+
+        13日目「直近添付ファイルを自動優先」対応: 📎で文書をアップロードした直後の
+        次のテキスト送信では、voice_gateway.py(自前UI)がstatic/index.html側で
+        覚えておいた直近アップロードファイル名を、`_extract_last_user_images()`が読む
+        `"images"`キーと同じ独自convention ―― 最後のuserメッセージ辞書の
+        `"attached_document"`キー ―― で載せて渡してくる。無ければNone(=従来どおり
+        通常の全文脈検索のみを行う)。
+        """
+        messages = body.get("messages", [])
+        for message in reversed(messages):
+            if message.get("role") == "user":
+                attached_document = message.get("attached_document")
+                return attached_document if isinstance(attached_document, str) and attached_document else None
+        return None
+
+    @staticmethod
+    def _extract_last_user_attached_document_text(body: dict) -> str | None:
+        """最後のuserメッセージに添付された文書の抽出済み全文を取り出す。
+
+        14日目「添付ファイルをそのまま1ターンだけプロンプトへ埋め込む」対応:
+        📎でアップロードした文書の抽出テキストがvoice_gateway.DOC_INLINE_MAX_CHARS
+        以下だった場合、static/index.html側が/documentsのレスポンスから覚えておき、
+        `_extract_last_user_attached_document()`が読む`"attached_document"`キーと
+        同じ独自conventionで、最後のuserメッセージ辞書の`"attached_document_text"`
+        キーに載せて渡してくる。無ければNone(=従来どおりRAG検索側の経路のみを使う)。
+        """
+        messages = body.get("messages", [])
+        for message in reversed(messages):
+            if message.get("role") == "user":
+                text = message.get("attached_document_text")
+                return text if isinstance(text, str) and text else None
+        return None
+
+    @staticmethod
+    def _extract_last_user_web_search(body: dict) -> bool:
+        """最後のuserメッセージのWeb検索要求フラグを取り出す。
+
+        14日目「13日目④の未結線を解消」対応: voice_gateway.py(自前UI)が
+        `_extract_last_user_images()`等と同じ独自convention ―― 最後のuserメッセージ
+        辞書の`"web_search"`キー(真偽値) ―― で載せて渡してくる。無ければFalse
+        (=従来どおりWeb検索を行わない)。
+        """
+        messages = body.get("messages", [])
+        for message in reversed(messages):
+            if message.get("role") == "user":
+                return bool(message.get("web_search"))
+        return False
 
     @staticmethod
     def _is_confirmation(text: str) -> bool:
@@ -314,11 +422,51 @@ class Pipe:
     # 分岐が増えるため除外する(YAGNI。⑤の文分割は最初の1文が出れば十分速い)。
     STREAM_ROUTES = {"FAST", "DEEP"}
 
-    def _recall(self, route: str, user_text: str) -> str:
-        """route別に過去の記憶を検索し、system用の文脈文字列を返す。失敗しても空文字を返す。"""
+    def _recall(
+        self,
+        route: str,
+        user_text: str,
+        attached_document: str | None = None,
+        attached_document_text: str | None = None,
+    ) -> str:
+        """route別に過去の記憶を検索し、system用の文脈文字列を返す。失敗しても空文字を返す。
+
+        attached_document: 13日目「直近添付ファイルを自動優先」対応。指定されている場合、
+        まずそのファイル(`source = f"doc:{attached_document}"`)だけに絞り込んだ検索を
+        先に行い、ヒットがあればそちらをそのまま使う(「このファイルを要約して」のような
+        あいまいな依頼でも、直近添付した1ファイルの内容が確実に文脈へ入るようにする狙い)。
+        ヒットが無かった場合(ファイル名不一致等のエッジケース)は、下の通常の全文脈検索へ
+        フォールバックし、従来より応答が悪化することがないようにする。
+
+        attached_document_text: 14日目「添付ファイルをそのまま1ターンだけプロンプトへ
+        埋め込む」対応。指定されている(=voice_gateway.DOC_INLINE_MAX_CHARS以下で
+        📷画像と同じ「生データをそのまま毎ターン渡す」経路に乗った)場合は、上のRAG検索
+        (source絞り込み・通常の全文脈検索のどちらも)を一切行わず、この全文をそのまま
+        文脈として返す。検索を挟まないぶん「limit件のチャンクしか載らない」制約が無く、
+        添付ファイルの全文が確実にそのターンの回答へ反映される(📷画像添付との対称性を
+        意識した設計)。念のためATTACHED_DOCUMENT_TEXT_MAX_CHARSでハードトランケートする
+        (冒頭のコメント参照。クライアント側の閾値判定に何かあってもここで安全弁が効く)。
+        """
+        if attached_document_text:
+            truncated = attached_document_text[:ATTACHED_DOCUMENT_TEXT_MAX_CHARS]
+            return (
+                f"以下は直近添付されたファイル「{attached_document}」の全文です。"
+                f"この内容に基づいて回答してください。\n\n{truncated}"
+            )
+
         if memory_store is None or not self.valves.memory_enabled or route not in self.RETRIEVE_ROUTES:
             return ""
         try:
+            if attached_document:
+                doc_source = f"{DOC_SOURCE_PREFIX}{attached_document}"
+                doc_hits = memory_store.retrieve(
+                    user_text,
+                    limit=max(self.valves.memory_top_k, 20),
+                    source=doc_source,
+                )
+                if doc_hits:
+                    return memory_store.format_context(doc_hits)
+
             # 7日目⑤: CODEルートを`route='CODE'`のみに絞ると、role='note'/
             # route='NOTE'で取り込んだノート由来の記憶(このプロジェクトの
             # 設計ノートはコード関連の記述が中心)が一切ヒットしなくなる
@@ -336,6 +484,39 @@ class Pipe:
         except Exception as e:  # 記憶レイヤーの障害で本体を止めない(④完了条件)
             print(f"[claire] 記憶の検索に失敗(処理は継続): {e}")
             return ""
+
+    def _web_search_context(self, user_text: str, requested: bool) -> tuple[str, list]:
+        """要求があればSearXNG(web_search.py)を叩き、system用の文脈文字列と
+        検索結果のリスト(出典表示用)を返す。失敗しても("", [])を返し、Pipe本体を止めない。
+
+        14日目: 13日目④で`web_search.py`本体+単体テストまでに区切っていた実装を、
+        ここでPipeのパイプラインへ結線する。`web_search.search()`自体も内部で
+        例外を握って空リストを返す設計だが(web_search.py参照)、フェイクへの
+        差し替えテストも含めて二重に保険を掛ける(_recall()の記憶レイヤー障害対応と同じ方針)。
+        """
+        if not requested or not self.valves.web_search_enabled:
+            return "", []
+        try:
+            results = web_search.search(user_text, limit=self.valves.web_search_limit)
+        except Exception as e:  # noqa: BLE001 - Web検索の障害で本体を止めない
+            print(f"[claire] Web検索に失敗(処理は継続): {e}")
+            return "", []
+        return web_search.format_for_prompt(results), results
+
+    @staticmethod
+    def _format_citations(results: list) -> str:
+        """Web検索結果を応答末尾に添える出典(タイトル+URL)一覧として整形する。
+
+        モデルがformat_for_prompt()の指示(本文中に出典URLを示す)を守るとは限らないため、
+        プロンプト任せにせずここで機械的に必ず付与する(defense in depth)。
+        ヒットが無ければ空文字(=何も付与しない)。
+        """
+        if not results:
+            return ""
+        lines = ["\n\n---\n出典:"]
+        for i, r in enumerate(results, 1):
+            lines.append(f"[{i}] {r.title} - {r.url}")
+        return "\n".join(lines)
 
     def _remember(self, chat_id: str, route: str, user_text: str, reply: str) -> None:
         """ユーザー発言とアシスタント応答を記憶DBへ書き戻す。失敗しても本体は止めない。"""
@@ -368,6 +549,7 @@ class Pipe:
         memory_context: str,
         prefix: str,
         images: list[str] | None = None,
+        citations: str = "",
     ) -> Iterator[str]:
         """FAST/DEEPの応答をトークン単位でyieldするジェネレータ(9日目④)。
 
@@ -384,6 +566,9 @@ class Pipe:
           - images: 11日目④-1「画像添付時はDEEPへ強制ルーティング」対応。
             画像添付が無いターン(従来通り)ではNone/空のままgenerate_streamへ渡り、
             既存呼び出し元の挙動は変わらない。
+          - citations: 14日目Web検索対応。`_format_citations()`が返す出典一覧文字列。
+            トークン列がエラーなく終わった場合のみ、最後に1回だけyieldする
+            (デバッグ接頭辞と同じく`_remember()`が書き戻す全文には含めない)。
         """
         target_model = router.ROUTE_MODEL_MAP[route]
         if prefix:
@@ -393,11 +578,17 @@ class Pipe:
         try:
             try:
                 router.ensure_model_ready(route)
+                # 12日目追記: 画像添付ターンだけTABLE_FORMAT_SYSTEM_PROMPTを足す
+                # (手書き表などをTSVでコピペ可能に出力させるため。理由は定義箇所参照)。
+                system_prompt = _combine_system_prompts(
+                    TABLE_FORMAT_SYSTEM_PROMPT if images else None, memory_context
+                )
                 stream = generate_stream(
                     model=target_model,
                     prompt=user_text,
-                    system=memory_context or None,
+                    system=system_prompt,
                     images=images or None,
+                    think=router.ROUTE_THINK_MAP.get(route),
                 )
             except OllamaError as e:
                 yield f"[error] {target_model} の呼び出しに失敗しました: {e}"
@@ -409,6 +600,9 @@ class Pipe:
                     yield token
             except OllamaError as e:
                 yield f"\n[error] {target_model} の応答が途中で終了しました: {e}"
+            else:
+                if citations:
+                    yield citations
         finally:
             reply = "".join(parts)
             if reply:
@@ -461,6 +655,13 @@ class Pipe:
         images = self._extract_last_user_images(body)
         force_route = "DEEP" if images else None
 
+        # 13日目「直近添付ファイルを自動優先」対応: 📎の文書添付直後のターンかどうかを
+        # 取り出しておき、下の_recall()呼び出しへ渡す(ルーティング自体には関与しない)。
+        attached_document = self._extract_last_user_attached_document(body)
+        # 14日目: DOC_INLINE_MAX_CHARS以下の抽出テキストがあれば、_recall()内で
+        # RAG検索を一切介さずこの全文をそのまま文脈として使う。
+        attached_document_text = self._extract_last_user_attached_document_text(body)
+
         error_prefix = ""
         try:
             route = session.get_route(chat_id, user_text, router.call_phi4, force_route=force_route)
@@ -486,13 +687,29 @@ class Pipe:
             return f"{error_prefix}{debug_prefix}{reply}"
 
         # 6日目④⑤: route別に過去の記憶を検索し、system用の文脈として差し込む。
-        memory_context = self._recall(route, user_text)
+        # 13日目: attached_documentがあれば_recall()内でその1ファイルを優先的に検索する。
+        # 14日目: attached_document_textがあれば検索すら行わず全文をそのまま使う。
+        memory_context = self._recall(route, user_text, attached_document, attached_document_text)
+
+        # 14日目: 13日目④で部品実装のみだったWeb検索をここで結線する。クライアントの
+        # Web検索トグルON時だけSearXNGを叩き、結果をsystem文脈へ記憶と連結して差し込む
+        # (どちらかを上書きしない。CODEルートのCODE_ACTION_SYSTEM_PROMPTとも同様)。
+        web_search_requested = self._extract_last_user_web_search(body)
+        web_context, web_results = self._web_search_context(user_text, web_search_requested)
+        context = _combine_system_prompts(memory_context, web_context)
+        citations = self._format_citations(web_results)
 
         # 9日目④: FAST/DEEPかつ呼び出し側がストリーミングを望む場合は、
         # ここでIteratorを返して以降の「全文を待つ」経路には入らない。
         if self._should_stream(body, route):
             return self._stream_reply(
-                chat_id, route, user_text, memory_context, f"{error_prefix}{debug_prefix}", images=images
+                chat_id,
+                route,
+                user_text,
+                context,
+                f"{error_prefix}{debug_prefix}",
+                images=images,
+                citations=citations,
             )
 
         try:
@@ -500,30 +717,38 @@ class Pipe:
             target_model = router.ROUTE_MODEL_MAP[route]
             if route == "CODE":
                 # CODEルートは既にCODE_ACTION_SYSTEM_PROMPTをsystem=で渡しているため、
-                # 記憶の文脈は上書きせず連結する(⑤の注意点。上書きするとACTIONブロック
+                # 記憶/Web検索の文脈は上書きせず連結する(⑤の注意点。上書きするとACTIONブロック
                 # 機能が壊れる)。
-                system_prompt = CODE_ACTION_SYSTEM_PROMPT
-                if memory_context:
-                    system_prompt = f"{CODE_ACTION_SYSTEM_PROMPT}\n\n{memory_context}"
-                reply = generate(model=target_model, prompt=user_text, system=system_prompt)
-            else:
-                # images: 11日目④-1。DEEPが非ストリーミング(streaming_mode="off"等)で
-                # 呼ばれた場合でも画像を渡せるよう、ここでも後方互換のoptional引数として渡す。
+                system_prompt = _combine_system_prompts(CODE_ACTION_SYSTEM_PROMPT, context)
                 reply = generate(
                     model=target_model,
                     prompt=user_text,
-                    system=memory_context or None,
+                    system=system_prompt,
+                    think=router.ROUTE_THINK_MAP.get(route),
+                )
+            else:
+                # images: 11日目④-1。DEEPが非ストリーミング(streaming_mode="off"等)で
+                # 呼ばれた場合でも画像を渡せるよう、ここでも後方互換のoptional引数として渡す。
+                # 12日目追記: 画像添付ターンだけTABLE_FORMAT_SYSTEM_PROMPTを足す(理由は定義箇所参照)。
+                system_prompt = _combine_system_prompts(
+                    TABLE_FORMAT_SYSTEM_PROMPT if images else None, context
+                )
+                reply = generate(
+                    model=target_model,
+                    prompt=user_text,
+                    system=system_prompt,
                     images=images or None,
+                    think=router.ROUTE_THINK_MAP.get(route),
                 )
         except OllamaError as e:
             target_model = router.ROUTE_MODEL_MAP[route]
             return f"{error_prefix}{debug_prefix}[error] {target_model} の呼び出しに失敗しました: {e}"
 
         # 6日目④⑤: 検索結果を反映する前の、モデルの生応答を記憶DBへ書き戻す
-        # (ACTION実行結果メッセージ等の後付け文言は含めない)。
+        # (ACTION実行結果メッセージ等の後付け文言は含めない。出典一覧も同様)。
         self._remember(chat_id, route, user_text, reply)
 
         if route == "CODE":
             reply = self._handle_code_reply(chat_id, reply)
 
-        return f"{error_prefix}{debug_prefix}{reply}"
+        return f"{error_prefix}{debug_prefix}{reply}{citations}"

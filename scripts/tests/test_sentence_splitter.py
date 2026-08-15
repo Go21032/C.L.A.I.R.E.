@@ -237,11 +237,45 @@ class TestTextNormalizationForSpeech(unittest.TestCase):
         self.assertEqual(out, ["詳しくはObsidianを見てください。"])
 
     def test_inline_code_backticks_are_removed(self):
+        """19日目 修正: 括弧内除去を導入したことで、コード片内の`()`もまとめて
+        除去されるようになった(既知の制約。docstring参照)。バッククォート自体が
+        除去されることの確認に主眼を置き、中身は括弧を含まない識別子にする。"""
         sp = make_splitter()
 
-        out = sp.feed("`print()`を使います。")
+        out = sp.feed("`hello`を使います。")
 
-        self.assertEqual(out, ["print()を使います。"])
+        self.assertEqual(out, ["helloを使います。"])
+
+    def test_parenthesized_text_is_not_read_aloud(self):
+        """19日目 修正: 「スパイダーマン：ブランド・ニュー・デイ(Spider-Man: Brand New
+        Day)」のように、原語表記や補足を括弧で添えている場合、そのまま読み上げると
+        同じ内容を2回言うことになりくどいため、括弧内の文字は読み上げから除く。"""
+        sp = make_splitter()
+
+        out = sp.feed(
+            "スパイダーマン:ブランド・ニュー・デイ(Spider-Man: Brand New Day)が公開されました。"
+        )
+
+        self.assertEqual(out, ["スパイダーマン:ブランド・ニュー・デイが公開されました。"])
+
+    def test_fullwidth_parenthesized_text_is_not_read_aloud(self):
+        sp = make_splitter()
+
+        out = sp.feed("会場は東京ドーム(とうきょうどーむ)です。")
+
+        self.assertEqual(out, ["会場は東京ドームです。"])
+
+        out2 = sp.feed("会場は東京ドーム(とうきょうどーむ)です。".replace("(", "（").replace(")", "）"))
+
+        self.assertEqual(out2, ["会場は東京ドームです。"])
+
+    def test_link_url_in_parens_is_still_dropped_correctly(self):
+        """リンク記法の`(url)`は、括弧除去より先にlink処理で消えるため二重に影響しない。"""
+        sp = make_splitter()
+
+        out = sp.feed("詳しくは[Obsidian](https://obsidian.md)を見てください。")
+
+        self.assertEqual(out, ["詳しくはObsidianを見てください。"])
 
     def test_list_bullets_are_removed(self):
         sp = make_splitter()

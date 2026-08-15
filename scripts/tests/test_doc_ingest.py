@@ -65,6 +65,39 @@ class TestExtractTextDispatch(unittest.TestCase):
         self.assertEqual(result, "pptx-text")
 
 
+class TestPlainTextExtraction(unittest.TestCase):
+    """12日目追記: 📷ボタン統合に伴い追加したコード/テキスト系ファイル対応の確認。"""
+
+    def test_py_file_dispatches_to_plain_text_extractor(self):
+        with patch.object(doc_ingest, "_extract_plain_text", return_value="text") as mocked:
+            result = doc_ingest.extract_text("a.py", b"data")
+        mocked.assert_called_once_with(b"data")
+        self.assertEqual(result, "text")
+
+    def test_utf8_source_code_round_trips(self):
+        code = 'print("こんにちは")\n'
+        text = doc_ingest.extract_text("hello.py", code.encode("utf-8"))
+        self.assertEqual(text, code)
+
+    def test_json_csv_and_other_code_extensions_are_supported(self):
+        for filename in ("data.json", "table.csv", "notes.md", "app.js", "query.sql"):
+            with self.subTest(filename=filename):
+                text = doc_ingest.extract_text(filename, "hello".encode("utf-8"))
+                self.assertEqual(text, "hello")
+
+    def test_cp932_source_falls_back_correctly(self):
+        # メモ帳等でShift_JIS(CP932)保存されたテキストでも文字化けせずに読めること。
+        text = "日本語のコメント".encode("cp932")
+        result = doc_ingest.extract_text("memo.txt", text)
+        self.assertEqual(result, "日本語のコメント")
+
+    def test_image_extension_still_unsupported(self):
+        # 画像はこのモジュールの対象外のまま(送信するとDEEPへ強制ルーティングされる
+        # 別経路(pendingImages)であり、ナレッジへの永続登録はしない)。
+        with self.assertRaises(doc_ingest.UnsupportedFileTypeError):
+            doc_ingest.extract_text("photo.png", b"dummy")
+
+
 class TestDocxExtraction(unittest.TestCase):
     """python-docxで実際にファイルを作成し、往復でテキストが取れることを確認する。"""
 
@@ -128,6 +161,50 @@ class TestPptxExtraction(unittest.TestCase):
         text = doc_ingest.extract_text("test.pptx", buf.getvalue())
         self.assertIn("slide 1", text)
         self.assertIn("スライドの本文テキスト", text)
+
+
+class TestGetDocumentText(unittest.TestCase):
+    """14日目①: get_document_text()。memory_storeをフェイクへ差し替え、LanceDBに
+    触れずに「チャンクを連結して復元する」ロジック(方針1)だけを検証する。
+    """
+
+    def _install_fake_memory_store(self, rows):
+        import pandas as pd
+
+        class FakeTable:
+            def __init__(self, rows):
+                self._df = pd.DataFrame(rows)
+
+            def count_rows(self):
+                return len(self._df)
+
+            def to_pandas(self):
+                return self._df
+
+        fake_module = type(sys)("memory_store")
+        fake_module._table = lambda: FakeTable(rows)
+        patcher = patch.dict(sys.modules, {"memory_store": fake_module})
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def test_concatenates_chunks_for_registered_file(self):
+        self._install_fake_memory_store(
+            [
+                {"source": "doc:a.pdf", "content": "1つ目のチャンク"},
+                {"source": "doc:a.pdf", "content": "2つ目のチャンク"},
+                {"source": "doc:other.pdf", "content": "無関係のチャンク"},
+            ]
+        )
+        text = doc_ingest.get_document_text("a.pdf")
+        self.assertEqual(text, "1つ目のチャンク\n\n2つ目のチャンク")
+
+    def test_returns_none_for_unregistered_file(self):
+        self._install_fake_memory_store([{"source": "doc:a.pdf", "content": "x"}])
+        self.assertIsNone(doc_ingest.get_document_text("unknown.pdf"))
+
+    def test_returns_none_when_table_is_empty(self):
+        self._install_fake_memory_store([])
+        self.assertIsNone(doc_ingest.get_document_text("a.pdf"))
 
 
 if __name__ == "__main__":

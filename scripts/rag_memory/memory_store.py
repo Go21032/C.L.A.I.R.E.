@@ -16,7 +16,7 @@ import yaml
 
 import chunker
 
-CONFIG_PATH = Path(__file__).resolve().parent.parent / "config.yaml"
+CONFIG_PATH = Path(__file__).resolve().parent / "config.yaml"
 CFG = yaml.safe_load(CONFIG_PATH.read_text(encoding="utf-8"))
 
 DB_PATH = CFG["db_path"]
@@ -72,7 +72,10 @@ def append_turn(chat_id: str, role: str, route: str, text: str, topic: str = "")
 
 
 def retrieve(
-    query: str, limit: int = 3, route: str | tuple[str, ...] | list[str] | None = None
+    query: str,
+    limit: int = 3,
+    route: str | tuple[str, ...] | list[str] | None = None,
+    source: str | None = None,
 ) -> list[dict]:
     """クエリに意味的に近い過去の記憶を返す。
 
@@ -81,6 +84,13 @@ def retrieve(
     `route='CODE'`のみに絞ると、role='note'/route='NOTE'で取り込んだ
     ノート由来の記憶が一切ヒットしなくなる設計上の衝突が判明したため、
     `route=("CODE", "NOTE")`のように複数routeを渡せるようにした)。
+
+    sourceに文字列を渡すと、その値と完全一致するsource列だけに絞り込む
+    (13日目「直近添付ファイルを自動優先」対応: doc_ingest.pyが
+    `f"doc:{filename}"`の形で登録するsourceを指定し、直近で📎添付された
+    1ファイルの記憶だけに絞り込んで検索するために使う)。routeと併用した
+    場合はAND条件になる。doc_ingest.pyの既存箇所と同じくクォートを
+    `''`にエスケープしてからWHERE句に埋め込む。
     """
     table = _table()
     if table.count_rows() == 0:
@@ -94,6 +104,9 @@ def retrieve(
         else:
             in_list = ", ".join(f"'{r}'" for r in route)
             search = search.where(f"route IN ({in_list})")
+    if source:
+        safe_source = source.replace("'", "''")
+        search = search.where(f"source = '{safe_source}'")
     df = search.limit(limit).to_pandas()
     return df[["content", "date", "role", "route", "_distance"]].to_dict("records")
 

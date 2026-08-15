@@ -313,6 +313,67 @@ class TestImageForcedRouting(StreamPipeTestCase):
 
         self.assertIsNone(recorder[0]["images"])
 
+    def test_image_attachment_adds_table_format_hint_to_system(self):
+        # 12日目追記→13日目改訂: ストリーミング経路でも、画像添付ターンにはTABLE_FORMAT_SYSTEM_PROMPTが
+        # systemへ足されること(手書き表などをMarkdownのパイプ表で出力させ、Obsidianノートへ
+        # コピペしたときに正しく表として描画させるための指示)。
+        self.set_route("DEEP")
+        recorder: list = []
+        self.set_stream_tokens(["ok"], recorder)
+        self.set_generate()
+
+        pipe = support_ai_auto_pipe.Pipe()
+        list(pipe.pipe(make_body("この表を読み取って", images=["QUJD"])))
+
+        self.assertIn(support_ai_auto_pipe.TABLE_FORMAT_SYSTEM_PROMPT, recorder[0]["system"])
+
+    def test_no_images_does_not_add_table_format_hint_to_system(self):
+        self.set_route("FAST")
+        recorder: list = []
+        self.set_stream_tokens(["こんにちは"], recorder)
+        self.set_generate()
+
+        pipe = support_ai_auto_pipe.Pipe()
+        list(pipe.pipe(make_body("今日の天気を教えて")))
+
+        self.assertIsNone(recorder[0]["system"])
+
+
+class TestThinkModeDisabledForTargetModels(StreamPipeTestCase):
+    """12日目①-2で判明した「FAST(gpt-oss:20b)/DEEP(gemma4:26b)が実運用で異常に遅い」問題への対応。
+
+    実機調査(12日目ノート「①-2で分かったFASTの遅延問題の解決」参照)で、
+    router.pyのROUTER_MODEL呼び出し(call_phi4)は7日目に`think=False`固定済みだったが、
+    FAST/DEEP/CODEの実際の応答生成モデル(generate_stream/generate)には`think`が
+    一切渡されておらずOllama既定(thinkingモード有効)のままだったことが直接検証で判明した。
+    実測(Ollama /api/generateへの直接A/Bテスト): gemma4:26bはthink未指定で32.38秒
+    → think=Falseで1.23秒(約26倍)。gpt-oss:20bはthink未指定で約5〜6秒の初手thinking遅延
+    → think="low"(gpt-oss固有の文字列指定、reasoning effort最小)で1.13秒。
+    この後方互換テストは、route別に正しいthink値がgenerate_stream/generateへ渡ることを保証する。
+    """
+
+    def test_fast_route_streams_with_low_reasoning_effort(self):
+        self.set_route("FAST")
+        recorder: list = []
+        self.set_stream_tokens(["こんにちは"], recorder)
+        self.set_generate()
+
+        pipe = support_ai_auto_pipe.Pipe()
+        list(pipe.pipe(make_body("今日の天気を教えて")))
+
+        self.assertEqual(recorder[0]["think"], "low")
+
+    def test_deep_route_streams_with_thinking_disabled(self):
+        self.set_route("DEEP")
+        recorder: list = []
+        self.set_stream_tokens(["本文"], recorder)
+        self.set_generate()
+
+        pipe = support_ai_auto_pipe.Pipe()
+        list(pipe.pipe(make_body("来月の旅行の計画を立てて")))
+
+        self.assertEqual(recorder[0]["think"], False)
+
 
 class TestStreamingErrorHandling(StreamPipeTestCase):
     def test_ollama_error_on_open_yields_error_text_instead_of_raising(self):

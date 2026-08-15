@@ -87,6 +87,7 @@ class Recognizer(Protocol):
     def PartialResult(self) -> str: ...
     def Result(self) -> str: ...
     def FinalResult(self) -> str: ...
+    def Reset(self) -> None: ...
 
 
 @dataclass
@@ -161,6 +162,28 @@ class STTEngine:
         """
         if self._pcm_buffer:
             self._finalize()
+
+    def force_finalize_pending(self) -> None:
+        """VAD(`vad.VoskEndpointVAD`)の無音保持(`silence_hold_sec`)を待たず、
+        今たまっている音声をその場で強制的に確定させる。
+
+        19日目 修正: ウェイクワード検出直後にこれを呼ぶことで、ウェイクワード発話
+        (「クレア起動」等)とそれに続くコマンド発話の間に3秒未満のポーズしかない場合に、
+        `vad.VoskEndpointVAD`の「保留中に発話が再開したら区切りを取り消して発話継続と
+        みなす」仕様によって両者が1つの確定テキストへ連結されてしまうバグを防ぐ。
+        呼んだ時点で発話の区切りを強制的に作り、以降の音声は新しい発話として扱われる。
+
+        `self.recognizer`(Vosk互換)自体もResetする。`_finalize()`が`self.vad`と
+        `_pcm_buffer`をリセットするだけでは、Kaldi側の内部デコード状態(=次の
+        PartialResult/Resultの土台になるハイポセシス)にはウェイクワード発話の内容が
+        残ったままになり、暫定プレビュー(`on_partial`経由で入力欄に出る文字列)に
+        ウェイクワードの文字が混ざり続けてしまうため、Resetで明示的に切り離す。
+        """
+        try:
+            self.recognizer.Reset()
+        except AttributeError:
+            pass  # フェイク/古い実装がReset()を持たない場合は無視(後方互換)
+        self._finalize()
 
     def _finalize(self) -> None:
         pcm = bytes(self._pcm_buffer)

@@ -24,11 +24,20 @@ for p in (SCRIPTS_DIR, TESTS_DIR):
 
 from fakes import ScriptedVoskRecognizer  # noqa: E402
 from stt_engine import STTEngine, correct_zunko, pcm16_bytes_to_waveform  # noqa: E402
+from vad import VoskEndpointVAD  # noqa: E402
+
+# 13日目①でVoskEndpointVADの既定silence_hold_secが3.0になったため、
+# STTEngine自体のロジック(バッファ/コールバック配線)だけを見たいテストでは
+# hold=0(=旧来の即時確定挙動)を明示して使う。hold自体の挙動はtest_vad.py側で検証する。
+# (VADはミュータブルなので、テストごとに新しいインスタンスを作る)
+def _immediate_vad_kwargs() -> dict:
+    return {"vad": VoskEndpointVAD(silence_hold_sec=0)}
 
 
 def make_engine(script, transcribe_final=None, **kwargs) -> tuple[STTEngine, list, list]:
     partials: list[str] = []
     finals: list[str] = []
+    kwargs = {**_immediate_vad_kwargs(), **kwargs}
     engine = STTEngine(
         recognizer=ScriptedVoskRecognizer(script),
         transcribe_final=transcribe_final or (lambda pcm: "(dummy)"),
@@ -42,6 +51,7 @@ def make_engine(script, transcribe_final=None, **kwargs) -> tuple[STTEngine, lis
 def make_engine_with_error(script, transcribe_final=None, correct_final=None, **kwargs):
     finals: list[str] = []
     errors: list[str] = []
+    kwargs = {**_immediate_vad_kwargs(), **kwargs}
     engine = STTEngine(
         recognizer=ScriptedVoskRecognizer(script),
         transcribe_final=transcribe_final or (lambda pcm: "(dummy)"),
@@ -229,6 +239,80 @@ class TestTranscriptionErrorHandling(unittest.TestCase):
 
         self.assertEqual(len(errors), 1)
         self.assertEqual(finals, ["2回目は成功"])
+
+
+class TestForceFinalizePending(unittest.TestCase):
+    """19日目 修正:`force_finalize_pending()`のユニットテスト。
+
+    ウェイクワード検出直後にVADの無音保持(silence_hold_sec)を待たず確定させる部品。
+    実機で報告されたバグ(ウェイクワード発話「クレア起動」と3秒未満のポーズで続く
+    コマンド発話が1つの確定テキストに連結されてしまう)の根本原因は、
+    `vad.VoskEndpointVAD`の「保留中に発話が再開したら区切りを取り消す」仕様と、
+    ウェイクワード検出後すぐに次の発話が来る典型的な使い方が噛み合っていなかったこと。
+    """
+
+    def test_forces_final_without_waiting_for_silence_hold(self):
+        """silence_hold_sec中(まだhold時間が経過していない)でも、その場で確定する。"""
+        engine, _, finals = make_engine(
+            [(False, "クレア起動", ""), (True, "", "クレア起動")],
+            transcribe_final=lambda pcm: "クレア起動",
+            vad=VoskEndpointVAD(silence_hold_sec=3.0),  # holdありの本来の既定値で検証
+        )
+
+        engine.feed_audio(b"\x01")  # on_partialで「クレア起動」を検出した想定
+        engine.feed_audio(b"\x02")  # Voskのエンドポイント検出(acceptedだがholdでpending中)
+        self.assertEqual(finals, [])  # まだ3秒経っていないので通常なら確定しない
+
+        engine.force_finalize_pending()
+
+        self.assertEqual(finals, ["クレア起動"])
+
+    def test_resets_the_underlying_recognizer(self):
+        """Kaldi側のデコード状態もResetし、以降のpartialにウェイクワードの文字が
+        残らないようにする(暫定プレビューへの混入防止)。"""
+        engine, _, _ = make_engine(
+            [(False, "クレア起動", "")], transcribe_final=lambda pcm: "クレア起動"
+        )
+        recognizer: ScriptedVoskRecognizer = engine.recognizer
+
+        engine.feed_audio(b"\x01")
+        self.assertEqual(recognizer.reset_calls, 0)
+
+        engine.force_finalize_pending()
+
+        self.assertEqual(recognizer.reset_calls, 1)
+
+    def test_buffer_and_vad_are_clean_for_the_next_utterance(self):
+        """force_finalize_pending()後、次に来る音声は前の発話と混ざらない
+        (①バッファがリセットされる、②その後のVAD状態が新しい発話として扱われる)。"""
+        seen_pcm: list[bytes] = []
+        engine, _, finals = make_engine(
+            [
+                (False, "クレア起動", ""),
+                (False, "明日の天気は", ""),
+                (True, "", "明日の天気は"),
+            ],
+            transcribe_final=lambda pcm: seen_pcm.append(pcm) or "dummy",
+        )
+
+        engine.feed_audio(b"\x01")  # 「クレア起動」検出
+        engine.force_finalize_pending()  # ここで区切る(ウェイクワード検出直後を模擬)
+        seen_pcm.clear()
+        finals.clear()
+
+        engine.feed_audio(b"\x02")  # 続くコマンド発話(新しい発話として処理されるべき)
+        engine.feed_audio(b"\x03")
+
+        self.assertEqual(len(finals), 1)
+        # 「クレア起動」チャンク(\x01)が混ざっていないこと
+        self.assertEqual(seen_pcm, [b"\x02\x03"])
+
+    def test_noop_when_nothing_is_buffered(self):
+        engine, _, finals = make_engine([])
+
+        engine.force_finalize_pending()
+
+        self.assertEqual(finals, [])
 
 
 class TestPcm16ToWaveform(unittest.TestCase):

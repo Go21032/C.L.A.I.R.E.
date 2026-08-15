@@ -1,0 +1,21 @@
+{
+  "session_id": "sess-20260816-021038-1303",
+  "title": "明日の東京の天気予報",
+  "created_at": "2026-08-16T02:10:38.710732",
+  "updated_at": "2026-08-16T02:11:25.251123",
+  "title_is_custom": false,
+  "turns": [
+    {
+      "role": "user",
+      "text": "明日の東京都の天気を教えて",
+      "route": "",
+      "ts": "2026-08-16T02:11:07.386229"
+    },
+    {
+      "role": "assistant",
+      "text": "[route: FAST]\n明日の東京都の天気は、**快晴**（最高気温 ≈ 30 ℃、最低気温 ≈ 22 ℃）で、降水確率はほぼ0％です。  \n※詳細はウェザーニュースの最新天気予報をご覧ください。  \n出典: https://weathernews.jp/onebox/tenki/tokyo/13100/\n\n---\n出典:\n[1] 東京の天気予報(1時間・今日明日・週間) - ウェザーニュース - https://weathernews.jp/onebox/tenki/tokyo/13100/\n[2] 日本気象協会 tenki.jp / 全国の天気予報・地震・台風 - https://tenki.jp/\n[3] 【一番当たる】東京の最新天気 (1時間・今日明日・週間 ... - https://weathernews.jp/v/wl/35.6777222222222/139.770527777778/q=%E6%9D%B1%E4%BA%AC&v=f02d60103eebddd4b43e66485464fc491ef1c14596ce3f73dcdd050eaf83551e&lang=ja\n[4] 東京（東京）の天気 - Yahoo!天気・災害 - https://weather.yahoo.co.jp/weather/jp/13/4410.html\n[5] 東京都の天気 - 日本気象協会 tenki.jp - https://tenki.jp/forecast/3/16/",
+      "route": "",
+      "ts": "2026-08-16T02:11:25.251123"
+    }
+  ]
+}

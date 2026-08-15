@@ -39,7 +39,7 @@ def generate(
     keep_alive: int | str = -1,
     timeout: float = 60.0,
     options: dict | None = None,
-    think: bool | None = None,
+    think: bool | str | None = None,
     images: list[str] | None = None,
 ) -> str:
     """/api/generate を1回だけ叩き、レスポンステキストを返す(stream=False)。
@@ -102,7 +102,7 @@ def generate_stream(
     keep_alive: int | str = -1,
     timeout: float = 60.0,
     options: dict | None = None,
-    think: bool | None = None,
+    think: bool | str | None = None,
     images: list[str] | None = None,
 ) -> Iterator[str]:
     """/api/generate を stream=True で叩き、生成トークンを届いた順にyieldする。

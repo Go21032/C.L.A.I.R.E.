@@ -57,6 +57,28 @@ ROUTE_MODEL_MAP: dict[str, str] = {
 VALID_ROUTES: set[str] = set(ROUTE_MODEL_MAP)
 DEFAULT_FALLBACK_ROUTE = "CLARIFY"
 
+# 12日目①-2で判明した実運用遅延の根本原因への対応。
+# ROUTER_MODEL(gemma4-e4b-cpu)については7日目⓪の時点で既に`think=False`固定済み
+# (45〜49行目のROUTER_THINK)だったが、実際にユーザーへ応答を返すFAST/DEEP/CODEの
+# 対象モデル(generate/generate_streamの呼び出し)には`think`が一切渡されておらず、
+# Ollama既定(thinkingモード有効)のまま呼ばれ続けていたことが12日目の実機調査で発覚した。
+# Ollama /api/generateへの直接A/Bテストで定量確認済み(12日目ノート参照):
+#   - gemma4:26b(DEEP): think未指定=32.38秒 → think=False=1.23秒(約26倍)
+#   - gpt-oss:20b(FAST): think未指定=約5〜6秒の初手遅延 → think="low"(gpt-oss固有の
+#     reasoning effort文字列指定。以前研究したbool版のFalseはgpt-oss側で無視され
+#     thinkingが生成され続けることを実測で確認したため、gpt-oss系だけ文字列指定にする)
+#     で1.13秒
+#   - devstral-small-2:24b(CODE): thinkingフィールド自体を持たないモデルだが、
+#     think未指定=32.04秒 → think=False=16.5秒と、こちらも明確に速くなることを確認したため
+#     同様にFalseを渡す
+# CLARIFYはROUTER_MODEL(gemma4-e4b-cpu)を使い、そちらは既にROUTER_THINKで制御済みのため
+# このマップの対象外とする。
+ROUTE_THINK_MAP: dict[str, bool | str] = {
+    "FAST": "low",
+    "DEEP": False,
+    "CODE": False,
+}
+
 _JSON_ROUTE_RE = re.compile(r'"route"\s*:\s*"(\w+)"')
 
 

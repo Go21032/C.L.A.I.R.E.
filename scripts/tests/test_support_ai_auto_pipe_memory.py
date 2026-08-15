@@ -30,10 +30,13 @@ import support_ai_auto_pipe  # noqa: E402
 from fakes import FailingMemoryStore, RecordingMemoryStore  # noqa: E402
 
 
-def make_body(text: str, chat_id: str = "chat-1") -> dict:
+def make_body(text: str, chat_id: str = "chat-1", attached_document: str | None = None) -> dict:
+    message: dict = {"role": "user", "content": text}
+    if attached_document:
+        message["attached_document"] = attached_document
     return {
         "chat_id": chat_id,
-        "messages": [{"role": "user", "content": text}],
+        "messages": [message],
     }
 
 
@@ -200,6 +203,82 @@ class TestSupportAiAutoPipeMemory(unittest.TestCase):
 
         self.assertIsNone(captured["system"])  # 検索失敗時はNone(文脈なし)で呼ばれる
         self.assertIn("DEEP応答", result)
+
+    # --- 13日目「直近添付ファイルを自動優先」 ---
+
+    def test_attached_document_uses_source_filtered_retrieve_first(self):
+        # 📎で直近添付されたファイル名がある場合、まず`source = "doc:<filename>"`で
+        # 絞り込んだ検索を行い、ヒットがあればそれだけをsystemの文脈として使う
+        # (通常の全文脈検索は呼ばない=応答がその1ファイルの内容に確実に集中する)。
+        recording = RecordingMemoryStore(
+            hits=[{"content": "無関係な過去の記憶", "date": "2026-08-01", "role": "user", "route": "DEEP", "_distance": 0.1}],
+            source_hits={
+                "doc:workout.pdf": [
+                    {"content": "1/10 ベンチプレス60kg×10", "date": "2026-08-14", "role": "document", "route": "DOCUMENT", "_distance": 0.1},
+                ]
+            },
+        )
+        support_ai_auto_pipe.memory_store = recording
+        router.call_phi4 = self._route_phi4("DEEP")
+
+        captured = {}
+
+        def fake_generate(model, prompt, **kw):
+            captured["system"] = kw.get("system")
+            return "要約しました"
+
+        support_ai_auto_pipe.generate = fake_generate
+
+        pipe = support_ai_auto_pipe.Pipe()
+        pipe.pipe(make_body("このファイルの内容を要約して", attached_document="workout.pdf"))
+
+        # source絞り込みの検索だけが呼ばれ(ヒットしたので通常の全文脈検索は呼ばれない)
+        self.assertEqual(len(recording.retrieve_calls), 1)
+        self.assertEqual(recording.retrieve_calls[0]["source"], "doc:workout.pdf")
+        self.assertIn("1/10 ベンチプレス60kg×10", captured["system"])
+        self.assertNotIn("無関係な過去の記憶", captured["system"])
+
+    def test_attached_document_with_no_source_hits_falls_back_to_generic_retrieve(self):
+        # source絞り込みでヒットが無い(ファイル名不一致等)場合は、従来どおりの
+        # 全文脈検索へフォールバックし、応答が「記憶なし」より悪化しないようにする。
+        recording = RecordingMemoryStore(
+            hits=[{"content": "通常検索でヒットした記憶", "date": "2026-08-01", "role": "user", "route": "DEEP", "_distance": 0.2}],
+            source_hits={"doc:workout.pdf": []},
+        )
+        support_ai_auto_pipe.memory_store = recording
+        router.call_phi4 = self._route_phi4("DEEP")
+
+        captured = {}
+
+        def fake_generate(model, prompt, **kw):
+            captured["system"] = kw.get("system")
+            return "回答"
+
+        support_ai_auto_pipe.generate = fake_generate
+
+        pipe = support_ai_auto_pipe.Pipe()
+        pipe.pipe(make_body("このファイルの内容を要約して", attached_document="workout.pdf"))
+
+        self.assertEqual(len(recording.retrieve_calls), 2)
+        self.assertEqual(recording.retrieve_calls[0]["source"], "doc:workout.pdf")
+        self.assertIsNone(recording.retrieve_calls[1]["source"])
+        self.assertIn("通常検索でヒットした記憶", captured["system"])
+
+    def test_no_attached_document_skips_source_filtered_retrieve(self):
+        # 後方互換の確認: attached_documentが無い従来どおりのターンでは、
+        # source絞り込み検索は行わず、これまでと同じ全文脈検索1回だけになる。
+        recording = RecordingMemoryStore(
+            hits=[{"content": "通常の記憶", "date": "2026-08-01", "role": "user", "route": "DEEP", "_distance": 0.2}]
+        )
+        support_ai_auto_pipe.memory_store = recording
+        router.call_phi4 = self._route_phi4("DEEP")
+        support_ai_auto_pipe.generate = lambda model, prompt, **kw: "回答"
+
+        pipe = support_ai_auto_pipe.Pipe()
+        pipe.pipe(make_body("来月の家族旅行のスケジュールを組んで"))
+
+        self.assertEqual(len(recording.retrieve_calls), 1)
+        self.assertIsNone(recording.retrieve_calls[0]["source"])
 
     def test_append_failure_does_not_crash_pipe(self):
         support_ai_auto_pipe.memory_store = FailingMemoryStore()

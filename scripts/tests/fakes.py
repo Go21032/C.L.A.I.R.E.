@@ -18,7 +18,7 @@ class NoopMemoryStore:
     """記憶レイヤーが「何もヒットしない・何も書き込まない」だけの最小フェイク。
     「Pipe自体のルーティングロジック」だけを検証したいテストではこれを使う。"""
 
-    def retrieve(self, query, limit=3, route=None):
+    def retrieve(self, query, limit=3, route=None, source=None):
         return []
 
     def format_context(self, hits, max_distance=0.45):
@@ -30,15 +30,24 @@ class NoopMemoryStore:
 
 class RecordingMemoryStore(NoopMemoryStore):
     """呼び出しを記録するフェイク。「retrieveがどのrouteで呼ばれたか」
-    「append_turnが何回・どんな内容で呼ばれたか」を検証するテストで使う。"""
+    「append_turnが何回・どんな内容で呼ばれたか」を検証するテストで使う。
 
-    def __init__(self, hits=None):
+    source_hits: 13日目「直近添付ファイル自動優先」対応のテスト用。
+    `source`引数付きでretrieve()が呼ばれた際、source_hitsに該当キーがあれば
+    そちらを返す(無ければ既定の`hits`を返す)。これにより「source絞り込み検索は
+    ヒットしたのでformat_context()にそれを使う/ヒットしなかったので通常検索に
+    フォールバックする」の両方をテストで再現できる。"""
+
+    def __init__(self, hits=None, source_hits=None):
         self.retrieve_calls: list[dict] = []
         self.append_calls: list[dict] = []
         self._hits = hits or []
+        self._source_hits = source_hits or {}
 
-    def retrieve(self, query, limit=3, route=None):
-        self.retrieve_calls.append({"query": query, "limit": limit, "route": route})
+    def retrieve(self, query, limit=3, route=None, source=None):
+        self.retrieve_calls.append({"query": query, "limit": limit, "route": route, "source": source})
+        if source is not None and source in self._source_hits:
+            return self._source_hits[source]
         return self._hits
 
     def format_context(self, hits, max_distance=0.45):
@@ -61,7 +70,7 @@ class FailingMemoryStore(NoopMemoryStore):
     retrieve/append_turnが例外を送出しても、Pipe本体の応答が止まらないこと
     (6日目④の完了条件)を確認するテストで使う。"""
 
-    def retrieve(self, query, limit=3, route=None):
+    def retrieve(self, query, limit=3, route=None, source=None):
         raise RuntimeError("simulated memory DB connection failure")
 
     def append_turn(self, chat_id, role, route, text, topic=""):
@@ -88,6 +97,14 @@ class ScriptedVoskRecognizer:
         self._last_partial_json = "{}"
         self._last_result_json = "{}"
         self.accept_waveform_calls: list[bytes] = []
+        self.reset_calls = 0
+
+    def Reset(self) -> None:
+        # 19日目: STTEngine.force_finalize_pending()が呼ぶ。実物のVosk同様、
+        # 呼ばれた回数だけ記録して以降のPartialResult/Resultへの影響は台本(script)
+        # 側で表現する(このフェイクはスクリプト駆動のため、Reset自体は暫定/確定の
+        # 中身を書き換えない。呼ばれたことの検証にはreset_callsを使う)。
+        self.reset_calls += 1
 
     def AcceptWaveform(self, data: bytes) -> bool:
         self.accept_waveform_calls.append(data)
