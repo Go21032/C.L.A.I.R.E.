@@ -1,4 +1,3 @@
-// ---- script block 0 ----
 "use strict";
 
 // --- 設定 -------------------------------------------------------------
@@ -27,6 +26,8 @@ const stopSpeechBtn = document.getElementById("stop-speech-btn");
 const newSessionBtn = document.getElementById("new-session-btn");
 const sessionSearchInput = document.getElementById("session-search-input");
 const sessionHistoryEl = document.getElementById("session-history");
+const artifactsListEl = document.getElementById("artifacts-list");           // 14日目③
+const googleStatusNoteEl = document.getElementById("google-status-note");    // 14日目④
 
 // --- 状態 ------------------------------------------------------------
 let ws = null;
@@ -56,6 +57,12 @@ let lastAttachedDocumentText = null;
 let pinnedDocument = localStorage.getItem("pinnedDocument") || null;  // ファイル名
 let pinnedDocumentText = null;                                        // 全文(閾値超/未取得ならnull)
 let lastKnownDocs = [];  // renderKnowledgeList()の再描画(ピン状態反映)用に直近の一覧を覚えておく
+
+// 14日目③: 資料生成の生成物検出用。ターン開始時点(final_transcript受信時)の
+// workspace/一覧をSetで覚えておき、ターン終了(state:idle)時点との差分を
+// 「今回の応答で新しく生成されたファイル」として応答の下に出す。
+let artifactsSnapshotBeforeTurn = new Set();
+let lastFinalizedTurnEl = null;  // 14日目③④: 1ターンにつき1回だけチップ/ボタンを付けるためのガード
 
 // 14日目②: チャット履歴の永続化(New Session・リネーム・削除・検索)。
 // chat_id(RAG記憶のキー)とsession_id(画面の会話)を一致させるため、選択中のIDを
@@ -293,6 +300,7 @@ function handleMessage(msg) {
       // 話し始めたら常にリアルタイムで入力欄へ反映する(ブラウザ側での編集途中に
       // 次の発話で上書きされうる点は既知のトレードオフ。10日目⑦で意図的に選んだ挙動)。
       textInput.value = msg.text;
+      autoResizeTextInput(); // 14日目⑦: 書き起こしは長くなりがちなので反映のたびに高さを追従させる
       // 13日目③: final(=①の3秒無音でVAD+faster-whisperが確定させた瞬間)になったら
       // 自動送信の候補として扱う(実際に送るかどうかはscheduleAutoSend内の条件次第)。
       if (msg.final) scheduleAutoSend();
@@ -313,6 +321,7 @@ function handleMessage(msg) {
         // 送られてくる(voice_gateway.pyの_check_wake_word呼び出し順)ため、
         // 上書きの順序は保証されている。
         textInput.value = msg.text_after;
+        autoResizeTextInput(); // 14日目⑦: ウェイクワードを除いて短くなった分、高さも縮める
       }
       break;
 
@@ -320,6 +329,12 @@ function handleMessage(msg) {
       // サーバが実際にAIへの処理を開始した(=送信が受理された)ことの通知。
       appendTurn(msg.text, "user");
       assistantTurnEl = null; // 新しいターンなので応答表示をリセット
+      lastFinalizedTurnEl = null;
+      // 14日目③: このターンで新しく生成されるファイルを検出するため、開始時点の
+      // workspace/一覧を覚えておく(非同期。応答が返るまでには十分間に合う)。
+      fetchArtifacts().then((list) => {
+        artifactsSnapshotBeforeTurn = new Set(list.map((a) => a.filename));
+      });
       break;
 
     case "token":
@@ -344,10 +359,19 @@ function handleMessage(msg) {
 
     case "state":
       setState(msg.value);
+      // 14日目③④: 応答が完全に返り終えたタイミング(idle)で、生成物チップと
+      // Google出力ボタンをこのターンの応答の下に1回だけ付ける。
+      if (msg.value === "idle") finalizeAssistantTurnUI();
       break;
 
     case "error":
       logError(`[${msg.stage}] ${msg.message}`);
+      break;
+
+    case "session_title_updated":
+      // 14日目④: 最初のやり取りの直後、バックグラウンドで生成されたLLM要約タイトルが
+      // 届いた通知。サイドバーの次回更新(会話切替等)を待たず、その場で反映する。
+      refreshSessionList(sessionSearchInput.value.trim());
       break;
 
     default:
@@ -554,16 +578,38 @@ function sendTextInput() {
   }
   ws.send(JSON.stringify(msg));
   textInput.value = "";
+  autoResizeTextInput(); // 14日目⑦: 送信後は1行の高さへ戻す(空欄なのに伸びたままになるのを防ぐ)
   clearPendingImages();
   // ★ pinnedDocument/pinnedDocumentTextはここでクリアしない(ピンが立っている限り毎ターン有効)
   lastAttachedDocument = null;
   lastAttachedDocumentText = null;
 }
 
+// --- 14日目⑦: 入力欄の高さを内容量に合わせる ---------------------------------
+// 単一行<input>では長文が横に流れて全文が見えなかったため<textarea>へ変更した。
+// 高さはCSSでは決められない(内容量に依存する)ので、ここで測って反映する。
+// いったんheightを"auto"へ戻してからscrollHeightを読むのが要点で、これをしないと
+// 「一度伸びた高さ」がscrollHeightの下限になってしまい、文字を消しても縮まなくなる。
+const TEXT_INPUT_MAX_HEIGHT = 200; // CSSの.pad-text textarea{max-height}と合わせること
+
+function autoResizeTextInput() {
+  textInput.style.height = "auto";
+  // 14日目⑦: 空のときは測らずにautoのまま(=rows="1"の自然な高さ)で抜ける。
+  // Chromeはvalueが空のtextareaのscrollHeightに**placeholderの折り返し高さ**を
+  // 含めるため、ここで測ると長いplaceholderのぶんだけ空欄が縦に膨らむ
+  // (実測: 空でscrollHeight=161px、短文入力時は44px)。
+  if (!textInput.value) return;
+  textInput.style.height = Math.min(textInput.scrollHeight, TEXT_INPUT_MAX_HEIGHT) + "px";
+}
+
+textInput.addEventListener("input", autoResizeTextInput);
+
 sendBtn.addEventListener("click", sendTextInput);
 textInput.addEventListener("keydown", (e) => {
   // isComposing: IME変換中のEnter確定でうっかり送信しないようにする
-  if (e.key === "Enter" && !e.isComposing) {
+  // 14日目⑦: Shift+Enterは改行として通す(textareaの既定動作に任せるため何もしない)。
+  // これが無いとtextareaにしても改行を入力する手段が無くなる。
+  if (e.key === "Enter" && !e.isComposing && !e.shiftKey) {
     e.preventDefault();
     sendTextInput();
   }
@@ -785,6 +831,205 @@ if (pinnedDocument) {
   pinDocument(pinnedDocument);
 }
 
+// --- 資料生成物(14日目③) ------------------------------------------------
+// voice_gateway.py の GET /artifacts(一覧)・GET /artifacts/{filename}(ダウンロード)を叩く。
+// 「AIが『作りました』と言ったか」ではなく「実際にworkspace/へファイルがあるか」だけを
+// 信じる(ノート③の設計方針と同じ)。
+
+async function fetchArtifacts() {
+  try {
+    const resp = await fetch("/artifacts");
+    if (!resp.ok) return [];
+    return await resp.json();
+  } catch (e) {
+    return [];
+  }
+}
+
+function formatArtifactSize(bytes) {
+  if (bytes < 1024) return `${bytes}B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)}KB`;
+  return `${(bytes / 1024 / 1024).toFixed(1)}MB`;
+}
+
+function renderArtifactsList(artifacts) {
+  artifactsListEl.innerHTML = "";
+  if (!artifacts || artifacts.length === 0) {
+    artifactsListEl.innerHTML = `<div class="hist-group">生成物はまだありません</div>`;
+    return;
+  }
+  for (const a of artifacts) {
+    const item = document.createElement("a");
+    item.className = "hist-item";
+    item.href = `/artifacts/${encodeURIComponent(a.filename)}`;
+    item.download = a.filename;
+    item.style.display = "block";
+    item.style.textDecoration = "none";
+
+    const ti = document.createElement("div");
+    ti.className = "ti";
+    ti.textContent = `📄 ${a.filename}`;
+    item.appendChild(ti);
+
+    const meta = document.createElement("div");
+    meta.className = "meta";
+    meta.innerHTML = `<span>${formatArtifactSize(a.size)}</span><span>${formatSessionMeta(a.modified)}</span>`;
+    item.appendChild(meta);
+
+    artifactsListEl.appendChild(item);
+  }
+}
+
+async function refreshArtifactsList() {
+  renderArtifactsList(await fetchArtifacts());
+}
+
+// --- 応答直下のアクション行(14日目③生成物チップ・14日目④Google出力ボタン) -----------
+// 1ターンにつき1つの<div class="turn-actions">をassistantTurnElの直後に作り、
+// そこへ生成物チップの行・Google出力ボタンの行をぶら下げる(挿入順が入れ替わらないように
+// 「行」単位でコンテナへappendChildする。insertAdjacentElement("afterend")を複数回呼ぶと
+// 後から呼んだほうが手前に来てしまうため)。
+function getOrCreateTurnActionsEl(turnEl) {
+  const next = turnEl.nextElementSibling;
+  if (next && next.classList.contains("turn-actions")) return next;
+  const el = document.createElement("div");
+  el.className = "turn-actions";
+  turnEl.insertAdjacentElement("afterend", el);
+  return el;
+}
+
+async function checkNewArtifactsAfterTurn(turnEl) {
+  const list = await fetchArtifacts();
+  renderArtifactsList(list);
+  const newOnes = list
+    .filter((a) => !artifactsSnapshotBeforeTurn.has(a.filename))
+    .map((a) => a.filename);
+  if (newOnes.length === 0) return;
+  const container = getOrCreateTurnActionsEl(turnEl);
+  const row = document.createElement("div");
+  row.className = "attach-row artifact-download-row";
+  for (const name of newOnes) {
+    const chip = document.createElement("a");
+    chip.className = "chip chip-link";
+    chip.href = `/artifacts/${encodeURIComponent(name)}`;
+    chip.download = name;
+    chip.textContent = `📄 ${name} をダウンロード`;
+    row.appendChild(chip);
+  }
+  container.appendChild(row);
+}
+
+// --- Google Workspace連携(14日目④) ---------------------------------------
+// voice_gateway.py の GET /google/status・POST /google/export を叩く。
+// LLM(devstral)からは呼ばせない(CODE_ACTION_SYSTEM_PROMPTのホワイトリスト外)ため、
+// ここのUI操作か、発話トリガー(support_ai_auto_pipe.py側)のどちらかからのみ実行される。
+
+async function refreshGoogleStatus() {
+  try {
+    const resp = await fetch("/google/status");
+    const status = await resp.json();
+    googleStatusNoteEl.innerHTML = "";
+    if (status.authenticated) {
+      googleStatusNoteEl.style.display = "none";
+      return;
+    }
+    googleStatusNoteEl.style.display = "";
+    const chip = document.createElement("span");
+    chip.className = "chip error";
+    chip.textContent = `⚠ Google連携を設定してください(${status.reason || "未認証"})`;
+    googleStatusNoteEl.appendChild(chip);
+  } catch (e) {
+    // 状態取得の失敗自体は致命的ではないため、通知は出さず静かに諦める。
+  }
+}
+
+function parseMarkdownTableToRows(text) {
+  // 表形式データをスプレッドシートの1セルへ丸ごと詰め込まず、行×列に分けて送るため、
+  // Markdownのパイプ表(| a | b |)があればそれを2次元配列へ変換する。
+  const lines = (text || "").split("\n").map((l) => l.trim()).filter((l) => l.startsWith("|") && l.endsWith("|"));
+  const rows = [];
+  for (const line of lines) {
+    if (/^\|[\s:|-]+\|$/.test(line)) continue;  // 区切り行(|---|---|)はスキップ
+    rows.push(line.slice(1, -1).split("|").map((c) => c.trim()));
+  }
+  if (rows.length > 0) return rows;
+  // Markdown表が見つからなければ、行ごとに1列としてそのまま送る(空行は除く)。
+  return (text || "").split("\n").map((l) => l.trim()).filter(Boolean).map((l) => [l]);
+}
+
+function appendGoogleResultChip(containerEl, label, isError, url) {
+  const chip = url ? document.createElement("a") : document.createElement("span");
+  chip.className = "chip google-result-chip" + (isError ? " error" : " chip-link");
+  if (url) {
+    chip.href = url;
+    chip.target = "_blank";
+    chip.rel = "noopener";
+  }
+  chip.textContent = label;
+  containerEl.appendChild(chip);
+}
+
+async function exportToGoogle(target, text, resultRowEl) {
+  resultRowEl.querySelectorAll(".google-result-chip").forEach((el) => el.remove());
+  const title = (text || "").replace(/\s+/g, " ").trim().slice(0, 30) || (target === "docs" ? "調査レポート" : "データ");
+  const payload = { target, title };
+  if (target === "docs") payload.text = text;
+  if (target === "sheets") payload.rows = parseMarkdownTableToRows(text);
+  try {
+    const resp = await fetch("/google/export", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    });
+    const body = await resp.json().catch(() => ({}));
+    if (!resp.ok) {
+      appendGoogleResultChip(resultRowEl, body.detail || `出力に失敗しました(HTTP ${resp.status})`, true);
+      return;
+    }
+    appendGoogleResultChip(
+      resultRowEl,
+      target === "docs" ? "📄 Googleドキュメントを開く" : "📊 スプレッドシートを開く",
+      false,
+      body.url
+    );
+    refreshGoogleStatus();  // 初回認証が成功していれば「未認証」の案内を消す
+  } catch (e) {
+    appendGoogleResultChip(resultRowEl, `出力に失敗しました: ${e.message || e}`, true);
+  }
+}
+
+function appendGoogleExportButtons(turnEl) {
+  const container = getOrCreateTurnActionsEl(turnEl);
+  const row = document.createElement("div");
+  row.className = "attach-row google-export-row";
+
+  const docsBtn = document.createElement("button");
+  docsBtn.type = "button";
+  docsBtn.className = "chip chip-action";
+  docsBtn.textContent = "📤 Googleドキュメントへ";
+  docsBtn.addEventListener("click", () => exportToGoogle("docs", turnEl.textContent, row));
+
+  const sheetsBtn = document.createElement("button");
+  sheetsBtn.type = "button";
+  sheetsBtn.className = "chip chip-action";
+  sheetsBtn.textContent = "📊 スプレッドシートへ";
+  sheetsBtn.addEventListener("click", () => exportToGoogle("sheets", turnEl.textContent, row));
+
+  row.appendChild(docsBtn);
+  row.appendChild(sheetsBtn);
+  container.appendChild(row);
+}
+
+// 1ターンの応答が完全に返り終えた(state:idle)タイミングでまとめて呼ぶ。
+// lastFinalizedTurnElで多重付与(state:idleが同一ターンで複数回届くケース)を防ぐ。
+function finalizeAssistantTurnUI() {
+  if (!assistantTurnEl || assistantTurnEl === lastFinalizedTurnEl) return;
+  if (!assistantTurnEl.textContent.trim()) return;  // 空応答(エラー等)には付けない
+  lastFinalizedTurnEl = assistantTurnEl;
+  appendGoogleExportButtons(assistantTurnEl);
+  checkNewArtifactsAfterTurn(assistantTurnEl);
+}
+
 knowledgeBtn.addEventListener("click", () => {
   const willOpen = !knowledgePanel.classList.contains("open");
   knowledgePanel.classList.toggle("open", willOpen);
@@ -932,6 +1177,10 @@ if (currentSessionId) {
   selectSession(currentSessionId);
 }
 
+// 14日目③④: 生成物一覧・Google認証状態も、ページ読み込み時に一度描画しておく。
+refreshArtifactsList();
+refreshGoogleStatus();
+
 // --- 起動 -----------------------------------------------------------------
 startBtn.addEventListener("click", async () => {
   startBtn.disabled = true;
@@ -955,7 +1204,6 @@ stopBtn.addEventListener("click", () => {
   stopBtn.disabled = true;
 });
 
-// ---- script block 1 ----
 "use strict";
 
 // === 外周リング 60本(細かいアーク目盛。装飾のみ) ===
@@ -1083,4 +1331,3 @@ textInput.addEventListener('input', () => clearTimeout(autoSendTimer));
   const savedRate = parseFloat(localStorage.getItem('playbackRate'));
   apply(Number.isFinite(savedRate) ? savedRate : parseFloat(range.value));
 })();
-

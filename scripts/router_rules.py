@@ -56,6 +56,18 @@ CODE_TRIGGERS: list[str] = [
     r"正規表現",
     r"マッチしない",
     r"意図通りに(動作|マッチ)しない",
+    # 14日目③: 資料・コード生成(Excel/PowerPoint/Word/JSON)の依頼。
+    # 「資料」「エクセル」は日常会話にも出てくる語(「資料を読んでいた」
+    # 「エクセルって難しいね」)なので、CODE_TRIGGERSの他の語と違って
+    # 名詞単独では一致させず、**必ず「依頼動詞」とセット**でのみ一致させる。
+    # (tests/test_router_rules.py::TestDocumentGenerationTriggersに誤爆しない
+    # ことの確認テストがある)
+    r"(エクセル|Excel|スプレッドシート|表).{0,6}(作っ|作成|まとめ|出力|書き出)",
+    r"(パワポ|PowerPoint|スライド|プレゼン).{0,6}(作っ|作成|まとめ|出力)",
+    r"(Word|ワード|報告書|議事録|レポート).{0,6}(作っ|作成|まとめ|出力|書い)",
+    r"(JSON|CSV|YAML).{0,6}(作っ|作成|出力|書き出|変換)",
+    r"資料.{0,4}(作っ|作成|まとめ|出力)",
+    r"グラフ.{0,4}(作っ|作成|にし|化し)",
 ]
 
 _CODE_TRIGGER_RE = re.compile("|".join(CODE_TRIGGERS), re.IGNORECASE)

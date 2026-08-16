@@ -111,5 +111,34 @@ class TestMatchRuleBased(unittest.TestCase):
         self.assertIsNone(match_rule_based("今日の天気を教えて"))
 
 
+class TestDocumentGenerationTriggers(unittest.TestCase):
+    """14日目③: 資料生成の依頼がCODEルートへ飛ぶこと。
+
+    ここが通らないと③の実装(code_executorの拡張)は一度も実行されない
+    (⓪-3のattached_document_textと同じ「経路が繋がっていない死にコード」になる)。
+    """
+
+    def test_excel_request_is_code(self):
+        self.assertEqual(match_rule_based("今の調査結果をエクセルにまとめて"), "CODE")
+
+    def test_slide_request_is_code(self):
+        self.assertEqual(match_rule_based("この構成でスライドを作って"), "CODE")
+
+    def test_word_request_is_code(self):
+        self.assertEqual(match_rule_based("報告書をWordで作成して"), "CODE")
+
+    def test_json_request_is_code(self):
+        self.assertEqual(match_rule_based("設定をJSONで書き出して"), "CODE")
+
+    # --- 誤爆しないこと(過剰検出の確認)。「資料」「エクセル」は日常会話にも
+    #     出てくる語のため、既存トリガーと同じ感覚で名詞単独を登録してはいけない。 ---
+
+    def test_casual_mention_of_document_is_not_code(self):
+        self.assertIsNone(match_rule_based("今日は一日資料を読んでいたよ"))
+
+    def test_casual_mention_of_excel_skill_is_not_code(self):
+        self.assertIsNone(match_rule_based("エクセルって難しいよね"))
+
+
 if __name__ == "__main__":
     unittest.main()

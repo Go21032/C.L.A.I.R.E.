@@ -32,7 +32,7 @@ from __future__ import annotations
 
 import re
 import subprocess
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 SCRIPT_DIR = Path(__file__).resolve().parent
@@ -63,6 +63,11 @@ class ExecutionResult:
     stderr: str
     returncode: int | None
     timed_out: bool
+    # 14日目③: 資料生成(Excel/PowerPoint/Word等)対応。実行前後でworkspace_dirを
+    # 走査し、新規作成/更新されたファイル(実行したスクリプト自身は除く)を記録する。
+    # LLMが「作りました」と言った応答文ではなく、ファイルシステムの実態だけを
+    # 「生成物」として信じるための仕組み(execute_python_file()参照)。
+    artifacts: list[str] = field(default_factory=list)
 
 
 def parse_action(text: str) -> CodeAction | None:
@@ -110,16 +115,39 @@ def write_action_file(action: CodeAction, workspace_dir: Path = WORKSPACE_DIR) -
     return target
 
 
-def execute_python_file(path: Path, timeout: float = 30.0) -> ExecutionResult:
+def _snapshot(workspace_dir: Path) -> dict[str, float]:
+    """workspace_dir配下の全ファイルの相対パスと更新時刻(mtime)を記録する。
+
+    14日目③: execute_python_file()が実行前後でこれを比較し、生成物を検出するために使う。
+    """
+    return {
+        str(p.relative_to(workspace_dir)): p.stat().st_mtime
+        for p in workspace_dir.rglob("*")
+        if p.is_file()
+    }
+
+
+def execute_python_file(path: Path, timeout: float = 120.0) -> ExecutionResult:
     """`python <path>` をサブプロセスで実行し、標準出力・標準エラー・終了コードを返す。
 
     timeout秒を超えて実行が終わらない場合はプロセスを強制終了し、
     timed_out=Trueとして返す(returncodeはNoneになる)。
+
+    14日目③の変更点:
+      - timeoutの既定値を30→120秒に延長した。`import pandas`やopenpyxl等での
+        xlsx書き出しは、初回インポート時のディスクI/O込みだと30秒に収まらない
+        ことがあるため。
+      - 実行の前後でworkspace_dir(path.parent)を走査し、新規作成/更新された
+        ファイルをartifactsとして返す。実行したスクリプト自身(path.name)は、
+        ユーザーが本当に欲しいのはその副産物(report.xlsx等)であって足場の
+        スクリプトではないため、artifactsから除外する。
     """
+    workspace_dir = path.parent
+    before = _snapshot(workspace_dir)
     try:
         proc = subprocess.run(
             ["python", str(path)],
-            cwd=str(path.parent),
+            cwd=str(workspace_dir),
             capture_output=True,
             text=True,
             encoding="utf-8",
@@ -129,11 +157,26 @@ def execute_python_file(path: Path, timeout: float = 30.0) -> ExecutionResult:
     except subprocess.TimeoutExpired as e:
         stdout = e.stdout or ""
         stderr = e.stderr or ""
-        return ExecutionResult(stdout=stdout, stderr=stderr, returncode=None, timed_out=True)
+        after = _snapshot(workspace_dir)
+        artifacts = _diff_artifacts(before, after, exclude=path.name)
+        return ExecutionResult(
+            stdout=stdout, stderr=stderr, returncode=None, timed_out=True, artifacts=artifacts
+        )
 
+    after = _snapshot(workspace_dir)
+    artifacts = _diff_artifacts(before, after, exclude=path.name)
     return ExecutionResult(
         stdout=proc.stdout,
         stderr=proc.stderr,
         returncode=proc.returncode,
         timed_out=False,
+        artifacts=artifacts,
+    )
+
+
+def _diff_artifacts(before: dict[str, float], after: dict[str, float], exclude: str) -> list[str]:
+    return sorted(
+        name
+        for name, mtime in after.items()
+        if name != exclude and (name not in before or before[name] != mtime)
     )

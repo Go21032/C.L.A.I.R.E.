@@ -675,6 +675,51 @@ class TestWakeWordWiring(unittest.TestCase):
         self.assertEqual(stt_holder[0].force_finalize_calls, 1)
         self.assertEqual(confirm, {"type": "final_transcript", "text": "接続が生きていることの確認"})
 
+    def test_forced_finalize_of_wake_word_only_text_is_not_resent_raw(self):
+        """20日目 修正: 「Hey, C.L.A.I.R.E.」のように呼びかけ単体で発話した場合、
+        `force_finalize_pending()`が同じウェイクワードのみのテキストで`on_final`を
+        再度呼んでも、その生テキストを`partial_transcript(final=true)`として
+        クライアントへ再送しないこと。
+
+        再送すると、`wake_detected`で一度`text_after`(トリム済み・空文字)へ
+        書き換わった入力欄が、この直後に届く2件目のfinal transcriptで生の
+        「Hey, C.L.A.I.R.E.」へ再び上書きされる。しかもこの時点では`wakeArmed`が
+        既にtrueになっているため、クライアント側の自動送信ゲートを素通りして
+        ウェイクワードの文字列そのものが誤送信される実バグがあった。
+        """
+        from fastapi.testclient import TestClient
+
+        stt_holder: list = []
+
+        def factory(on_partial, on_final, on_stt_error):
+            engine = FakeSttEngine(
+                on_partial,
+                on_final,
+                on_stt_error,
+                partial_text="Hey, C.L.A.I.R.E.",
+                force_finalize_on_final_text="Hey, C.L.A.I.R.E.",
+            )
+            stt_holder.append(engine)
+            return engine
+
+        app = create_app(
+            pipe_factory=lambda: FakePipe("dummy"),
+            stt_engine_factory=factory,
+            synthesize=lambda text: b"",
+        )
+        with TestClient(app).websocket_connect("/ws") as ws:
+            ws.send_bytes(b"\x00\x01")
+            received = [ws.receive_json() for _ in range(3)]  # partial/wake_detected/audioの3件のみのはず
+            # 4件目が無いこと(=誤ったfinal再送が無いこと)を、後続メッセージへの応答で確認する。
+            ws.send_json({"type": "text_input", "text": "後続確認"})
+            confirm = ws.receive_json()
+
+        final_partials = [
+            m for m in received if m["type"] == "partial_transcript" and m.get("final")
+        ]
+        self.assertEqual(final_partials, [])  # ウェイクワードのみの生テキストが再送されていないこと
+        self.assertEqual(confirm, {"type": "final_transcript", "text": "後続確認"})
+
 
 class TestCancelTurnWiring(unittest.TestCase):
     """17日目「誤送信の即時停止」対応: WSの"cancel_turn"メッセージが実際に応答生成を
@@ -945,6 +990,152 @@ class TestSessionEndpoints(unittest.TestCase):
         resp = self.client.get("/sessions", params={"q": "筋トレ"})
         ids = [s["session_id"] for s in resp.json()]
         self.assertEqual(ids, [s1["session_id"]])
+
+
+class TestArtifactEndpoints(unittest.TestCase):
+    """14日目③: 資料生成の生成物一覧・ダウンロード(GET /artifacts, GET /artifacts/{filename})。
+
+    code_executor.WORKSPACE_DIRをtmp_pathへ差し替え、実際のworkspace/を汚さずに検証する。
+    """
+
+    def setUp(self):
+        import tempfile
+
+        from fastapi.testclient import TestClient
+
+        import code_executor
+
+        self._tmpdir = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmpdir.cleanup)
+        self.workspace = Path(self._tmpdir.name)
+
+        patcher = patch.object(code_executor, "WORKSPACE_DIR", self.workspace)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+        app = create_app(
+            pipe_factory=lambda: FakePipe("dummy"),
+            stt_engine_factory=lambda *_: object(),
+            synthesize=lambda text: b"",
+        )
+        self.client = TestClient(app)
+
+    def test_list_artifacts_returns_empty_when_workspace_has_no_files(self):
+        resp = self.client.get("/artifacts")
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(resp.json(), [])
+
+    def test_list_artifacts_returns_filename_size_and_modified(self):
+        (self.workspace / "report.xlsx").write_bytes(b"dummy-xlsx-bytes")
+        resp = self.client.get("/artifacts")
+        self.assertEqual(resp.status_code, 200)
+        body = resp.json()
+        self.assertEqual(len(body), 1)
+        self.assertEqual(body[0]["filename"], "report.xlsx")
+        self.assertEqual(body[0]["size"], len(b"dummy-xlsx-bytes"))
+        self.assertIn("modified", body[0])
+
+    def test_download_artifact_returns_file_content(self):
+        (self.workspace / "report.xlsx").write_bytes(b"dummy-xlsx-bytes")
+        resp = self.client.get("/artifacts/report.xlsx")
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(resp.content, b"dummy-xlsx-bytes")
+
+    def test_download_unknown_artifact_returns_404(self):
+        resp = self.client.get("/artifacts/does-not-exist.xlsx")
+        self.assertEqual(resp.status_code, 404)
+
+    def test_download_with_parent_traversal_returns_404(self):
+        # ④のGoogle認証トークン(secrets/token.json等)がworkspace/の外にある以上、
+        # ここが抜けると認証情報が丸ごと持ち出せる経路になるため必ず404にする。
+        resp = self.client.get("/artifacts/../voice_gateway.py")
+        self.assertEqual(resp.status_code, 404)
+
+
+class TestGoogleEndpoints(unittest.TestCase):
+    """14日目④: Google Workspace連携(GET /google/status, POST /google/export)。
+
+    google_workspaceモジュール自体をフェイクへ差し替え、ネットワーク/ブラウザ同意には
+    一切触れない(google_workspace自身のテストはtest_google_workspace.pyが担当)。
+    """
+
+    def setUp(self):
+        import tempfile
+
+        from fastapi.testclient import TestClient
+
+        import code_executor
+        import google_workspace
+
+        self._tmpdir = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmpdir.cleanup)
+        self.workspace = Path(self._tmpdir.name)
+        ws_patcher = patch.object(code_executor, "WORKSPACE_DIR", self.workspace)
+        ws_patcher.start()
+        self.addCleanup(ws_patcher.stop)
+
+        self.gw = google_workspace
+        app = create_app(
+            pipe_factory=lambda: FakePipe("dummy"),
+            stt_engine_factory=lambda *_: object(),
+            synthesize=lambda text: b"",
+        )
+        self.client = TestClient(app)
+
+    def test_google_status_returns_check_status_result(self):
+        with patch.object(
+            self.gw, "check_status", return_value={"authenticated": False, "reason": "未認証です"}
+        ):
+            resp = self.client.get("/google/status")
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(resp.json(), {"authenticated": False, "reason": "未認証です"})
+
+    def test_export_to_docs_returns_url(self):
+        with patch.object(self.gw, "export_to_docs", return_value="https://docs.google.com/document/d/X/edit") as fake:
+            resp = self.client.post(
+                "/google/export", json={"target": "docs", "text": "本文", "title": "調査レポート"}
+            )
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(resp.json(), {"url": "https://docs.google.com/document/d/X/edit"})
+        fake.assert_called_once_with("調査レポート", "本文")
+
+    def test_export_to_sheets_returns_url(self):
+        with patch.object(self.gw, "export_to_sheets", return_value="https://docs.google.com/spreadsheets/d/X/edit") as fake:
+            resp = self.client.post(
+                "/google/export", json={"target": "sheets", "rows": [["a", "b"]], "title": "データ"}
+            )
+        self.assertEqual(resp.status_code, 200)
+        fake.assert_called_once_with("データ", [["a", "b"]])
+
+    def test_export_to_drive_uploads_artifact(self):
+        (self.workspace / "report.xlsx").write_bytes(b"dummy")
+        with patch.object(self.gw, "upload_to_drive", return_value="https://drive.google.com/file/d/X/view") as fake:
+            resp = self.client.post("/google/export", json={"target": "drive", "artifact": "report.xlsx"})
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(resp.json(), {"url": "https://drive.google.com/file/d/X/view"})
+        fake.assert_called_once()
+
+    def test_export_to_drive_with_unknown_artifact_returns_404(self):
+        resp = self.client.post("/google/export", json={"target": "drive", "artifact": "missing.xlsx"})
+        self.assertEqual(resp.status_code, 404)
+
+    def test_export_to_drive_with_traversal_artifact_returns_404(self):
+        resp = self.client.post("/google/export", json={"target": "drive", "artifact": "../voice_gateway.py"})
+        self.assertEqual(resp.status_code, 404)
+
+    def test_export_with_invalid_target_returns_400(self):
+        resp = self.client.post("/google/export", json={"target": "pdf"})
+        self.assertEqual(resp.status_code, 400)
+
+    def test_export_returns_401_with_friendly_message_when_not_authenticated(self):
+        with patch.object(
+            self.gw,
+            "export_to_docs",
+            side_effect=self.gw.NotAuthenticatedError("Googleの認証が期限切れです。再認証してください。"),
+        ):
+            resp = self.client.post("/google/export", json={"target": "docs", "text": "本文"})
+        self.assertEqual(resp.status_code, 401)
+        self.assertIn("再認証", resp.json()["detail"])
 
 
 class TestSessionPersistenceWiring(unittest.TestCase):

@@ -46,6 +46,7 @@ description: >
 
 from __future__ import annotations
 
+import re
 import sys
 from pathlib import Path
 from typing import Any, Iterator
@@ -71,7 +72,9 @@ if str(ROUTER_SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(ROUTER_SCRIPTS_DIR))
 
 import code_executor  # noqa: E402
+import google_workspace  # noqa: E402 - 14日目④: 発話での「Googleドキュメントに出力」トリガー
 import router  # noqa: E402
+import router_rules  # noqa: E402 - バグ修正: 画像+実ファイル生成の組み合わせ検出に使う
 import web_search  # noqa: E402 - 14日目: 13日目④で部品実装のみ区切っていたWeb検索を結線する
 from ollama_client import OllamaError, generate, generate_stream  # noqa: E402
 
@@ -138,6 +141,29 @@ CODE_ACTION_SYSTEM_PROMPT = """あなたはユーザーのコーディング依�
 - ユーザーの依頼がコードレビュー・質問応答・説明など、ファイル作成を伴わないものであれば、
   ACTIONブロックは使わず、通常の説明文だけで回答すること。
 - ACTIONブロックは1回answerにつき1つだけ出力すること。
+
+【資料ファイルの作成について】(14日目③)
+Excel(.xlsx)・PowerPoint(.pptx)・Word(.docx)はバイナリ形式のため、
+ACTIONブロックに直接書くことはできません。かわりに**そのファイルを生成する
+Pythonスクリプト**をACTIONブロックに書き、run="true"で実行してください。
+
+使用してよいライブラリ(すべてインストール済み):
+  - openpyxl     … Excel(.xlsx)の作成
+  - python-pptx  … PowerPoint(.pptx)の作成(import名は pptx)
+  - python-docx  … Word(.docx)の作成(import名は docx)
+  - pandas       … 表データの整形
+  - json / csv / pathlib / datetime … 標準ライブラリ
+
+これ以外のライブラリ(matplotlib, xlsxwriter, reportlab, google_workspace等)は
+使わないでください。Google Drive/Docs/Sheetsへの出力は別の仕組み(UIのボタン)
+で行うため、コードから直接操作しないこと。
+
+保存先は**カレントディレクトリ直下の相対パス**にしてください(例: wb.save("報告書.xlsx"))。
+絶対パスや".."を含むパスは安全のため拒否されます。
+日本語を含む場合はファイル名・セル内容ともにそのまま日本語で構いません。
+
+JSON・CSV・Markdown・テキストファイルは、スクリプトを書かずに
+ACTIONブロックへ直接内容を書いてrun="false"で保存してください。
 """
 
 # 12日目追記→13日目改訂: 画像添付(force_route=DEEP)時に、手書きワークアウト表などの
@@ -161,6 +187,89 @@ TABLE_FORMAT_SYSTEM_PROMPT = """表形式のデータ(ワークアウト記録�
 正しく描画されるようにするためです。表以外の説明文は普段どおり自然な日本語の
 文章で書いてください。
 """
+
+# バグ修正: 「〇〇を調べて表にまとめてスプレッドシートに出力して」のように依頼本体と
+# Google出力指示が同じ発話にまとまっている場合、この回答が生成された後にPython側
+# (_export_text_to_google)が実際のGoogle API呼び出しを行う。生成モデルはその事実を
+# 知らないため、素の発話をそのまま渡すと「スプレッドシートに出力しました」のように
+# 実際には行っていない処理を行ったかのごとく答えてしまう。それを防ぐための追加指示。
+GOOGLE_EXPORT_COMBINED_SYSTEM_PROMPT = """この依頼には「Googleドキュメント/スプレッドシートに出力して」という指示が
+含まれていますが、実際の出力(Google APIの呼び出し)はあなたの回答の生成後に
+システム側が自動で行います。あなたは実際にGoogleへ出力する手段を持たないので、
+「出力しました」「スプレッドシートを作成しました」のような発言はせず、依頼された
+内容(表・文章など)を作成することだけに専念してください。
+"""
+
+
+# 14日目④: 発話での「Googleドキュメントに出力して」「スプレッドシートにして」トリガー。
+# UIのボタン(voice_gateway.pyのPOST /google/export)を主、これを従とする(方針表参照)。
+# 誤爆を避けるため、③の資料生成トリガーと同じく名詞単独ではなく「依頼動詞」とセットで
+# 一致させる(「Googleドキュメントって便利だよね」等の雑談への誤爆を防ぐ)。
+_GOOGLE_EXPORT_TRIGGERS: list[tuple[re.Pattern, str]] = [
+    (re.compile(r"(Google\s*ドキュメント|Googleドキュメント|グーグルドキュメント).{0,6}(出力|書き出|まとめ|して)"), "docs"),
+    (
+        re.compile(
+            r"(Google\s*スプレッドシート|Googleスプレッドシート|グーグルスプレッドシート|"
+            r"スプレッドシート|Google\s*シート).{0,6}(出力|書き出|まとめ|にして|して)"
+        ),
+        "sheets",
+    ),
+]
+
+
+def _match_google_export_target(text: str) -> str | None:
+    """発話テキストから"docs"/"sheets"のどちらのGoogle出力依頼かを判定する。一致しなければNone。"""
+    for pattern, target in _GOOGLE_EXPORT_TRIGGERS:
+        if pattern.search(text):
+            return target
+    return None
+
+
+def _split_google_export_request(user_text: str) -> tuple[str | None, str]:
+    """発話からGoogle出力トリガーを検出し、(出力先, トリガー部分を除いた残りのテキスト)を返す。
+
+    バグ修正(14日目④で見送っていたケース): 「2026年7月から放送開始したアニメを
+    一覧表で作成し、スプレッドシムで出力してください」のように、依頼本体と出力指示が
+    同じ発話にまとまっているケースを検出するために使う。トリガーが無ければ(None, "")。
+    """
+    for pattern, target in _GOOGLE_EXPORT_TRIGGERS:
+        match = pattern.search(user_text)
+        if match:
+            remainder = user_text[: match.start()] + user_text[match.end() :]
+            return target, remainder
+    return None, ""
+
+
+_GOOGLE_EXPORT_TRAILING_POLITE = re.compile(r"(してください|下さい|ください|お願いします|お願いいたします)+$")
+_GOOGLE_EXPORT_REFERENCE_ONLY = re.compile(
+    r"^(それ|これ|あれ|上記|先ほど|さっき|前回|今の)(の(結果|内容|回答|話))?(を|は|も)?$"
+)
+
+
+def _has_substantive_remainder(remainder: str) -> bool:
+    """トリガー部分を除いた残りのテキストが、実質的な新しい依頼を含むかを判定する。
+
+    バグ修正: 「Googleドキュメントに出力して」「それをスプレッドシートにして」のような、
+    出力指示だけ(または直前の応答を指す短い参照)の発話は、従来どおり直前の
+    アシスタント応答をそのまま書き出すのが正しい挙動(_handle_google_export_request)。
+    一方「〇〇を調べて表にまとめてスプレッドシートに出力してください」のように依頼本体が
+    同じ発話に混ざっている場合、直前の応答を探しに行っても(そもそも会話の最初の発言で
+    あることが多く)何も見つからず、これまでは「出力する直前の応答が見つかりませんでした」
+    とだけ返して依頼そのものを一度も処理していなかった。ここで両者を切り分ける。
+    """
+    text = remainder.strip(" 、。,.\n\t")
+    text = _GOOGLE_EXPORT_TRAILING_POLITE.sub("", text).strip(" 、。,.\n\t")
+    if not text:
+        return False
+    if _GOOGLE_EXPORT_REFERENCE_ONLY.match(text):
+        return False
+    # 「それを」のような短い接続の残骸だけなら実質的な依頼とはみなさない
+    return len(text) >= 6
+
+
+# バグ修正: TABLE_FORMAT_SYSTEM_PROMPTでモデルに出させるMarkdownパイプ表の区切り行
+# (例: "|---|---|"、"| :--- | ---: |")を検出する。Sheetsへ書き込む際にこの行は不要。
+_MD_TABLE_SEPARATOR_ROW = re.compile(r"^\|?\s*:?-{2,}:?\s*(\|\s*:?-{2,}:?\s*)*\|?$")
 
 
 def _combine_system_prompts(*prompts: str | None) -> str | None:
@@ -325,6 +434,22 @@ class Pipe:
         return None
 
     @staticmethod
+    def _extract_last_assistant_text(body: dict) -> str:
+        """直前のアシスタント応答の全文を取り出す。
+
+        14日目④: 「Googleドキュメントに出力して」の発話トリガーで、何を出力するかは
+        直近の自分(assistant)の発言そのもの。bodyの会話履歴(messages)は既にOpen WebUI/
+        static/index.html側が積んでいるので、ここでは末尾から遡ってrole=="assistant"の
+        最初の1件を拾うだけでよい(新たに何かを覚えておく必要はない)。
+        """
+        messages = body.get("messages", [])
+        for message in reversed(messages):
+            if message.get("role") == "assistant":
+                content = message.get("content", "")
+                return content if isinstance(content, str) else ""
+        return ""
+
+    @staticmethod
     def _extract_last_user_web_search(body: dict) -> bool:
         """最後のuserメッセージのWeb検索要求フラグを取り出す。
 
@@ -372,7 +497,12 @@ class Pipe:
 
         result = code_executor.execute_python_file(written_path)
         if result.timed_out:
-            return f"[C.L.A.I.R.E.] `{written_path}` を作成しましたが、実行がタイムアウトしました。"
+            lines = [f"[C.L.A.I.R.E.] `{written_path}` を作成しましたが、実行がタイムアウトしました。"]
+            # 14日目③: タイムアウトしても途中まで生成物ができていることがあるため、
+            # あれば伝える(ユーザーが「なぜかExcelが半分しかできていない」原因に気付ける)。
+            if result.artifacts:
+                lines.append("📄 生成物(途中経過): " + ", ".join(result.artifacts))
+            return "\n".join(lines)
 
         lines = [
             f"[C.L.A.I.R.E.] `{written_path}` を作成し、実行しました(終了コード: {result.returncode})。"
@@ -381,7 +511,73 @@ class Pipe:
             lines.append(f"標準出力:\n{result.stdout}")
         if result.stderr:
             lines.append(f"標準エラー:\n{result.stderr}")
+        # 14日目③: LLMの応答文ではなく、実際にworkspace/へ生成されたファイルの実態だけを
+        # 「生成物」として伝える(⓪-3のような「経路が繋がっていない死にコード」を防ぐ)。
+        if result.artifacts:
+            lines.append("📄 生成物: " + ", ".join(result.artifacts))
         return "\n".join(lines)
+
+    def _handle_google_export_request(self, body: dict, target: str) -> str:
+        """14日目④: 発話での「Googleドキュメントに出力して」(単独)トリガーへの応答。
+
+        直前のアシスタント応答をそのままGoogleへ書き出す(方針表「出力対象」参照。
+        UIのボタンが主・これは従なので、対象は「直前の応答」1択で十分)。
+        google_workspaceはLLMからは呼ばせず、必ずこの関数経由でのみ実行する。
+
+        バグ修正: 依頼本体が同じ発話に混ざっている場合(「〇〇をスプレッドシートに
+        出力して」)はpipe()側が_has_substantive_remainder()で検出し、この関数を
+        経由せず生成後のテキストを直接_export_text_to_google()へ渡す。この関数は
+        「(直前の応答をそのまま出力してほしいだけの)発話単独トリガー」専用。
+        """
+        last_reply = self._extract_last_assistant_text(body)
+        if not last_reply.strip():
+            return "[C.L.A.I.R.E.] 出力する直前の応答が見つかりませんでした。まず何か質問してください。"
+        return self._export_text_to_google(last_reply, target)
+
+    @staticmethod
+    def _rows_for_sheets(text: str) -> list[list[str]]:
+        """スプレッドシートへ書き込む2次元配列を組み立てる。
+
+        バグ修正: 従来は`[[line] for line in text.splitlines()]`で1行=1セルに
+        丸ごと詰め込んでいたため、TABLE_FORMAT_SYSTEM_PROMPTでモデルに出させている
+        Markdownのパイプ表(`| 見出しA | 見出しB |`)がそのまま1セルへ入ってしまい、
+        「セルが分かれて入る」というチェックリスト項目を満たしていなかった。
+        ここではパイプ表の行だけ`|`で列に分割し(区切り行`|---|---|`は除く)、
+        パイプ表以外の説明文の行は従来どおり1行1セルとして扱う(完全な後方互換)。
+        """
+        rows: list[list[str]] = []
+        for line in text.splitlines():
+            stripped = line.strip()
+            if not stripped:
+                continue
+            if _MD_TABLE_SEPARATOR_ROW.match(stripped):
+                continue  # |---|---| のような区切り行は書き込まない
+            if stripped.startswith("|") and stripped.endswith("|") and stripped.count("|") >= 3:
+                rows.append([cell.strip() for cell in stripped.strip("|").split("|")])
+            else:
+                rows.append([stripped])
+        return rows
+
+    def _export_text_to_google(self, text: str, target: str) -> str:
+        """任意のテキストをGoogle Docs/Sheetsへ出力する。
+
+        バグ修正で新設: 従来の_handle_google_export_request()は「会話履歴に既にある
+        直前の応答」しか出力できなかった。「〇〇を調べて表にまとめてスプレッドシートに
+        出力してください」のように依頼と出力指示が同じ発話にまとまっている場合は、
+        pipe()が通常の分類・生成を行った直後にできたテキストをここへ渡す。
+        """
+        if not text.strip():
+            return "[C.L.A.I.R.E.] 出力する内容が空でした。もう一度依頼し直してください。"
+        title = text.strip()[:30] or ("調査レポート" if target == "docs" else "データ")
+        try:
+            if target == "docs":
+                url = google_workspace.export_to_docs(title, text)
+                return f"[C.L.A.I.R.E.] Googleドキュメントへ出力しました: {url}"
+            rows = self._rows_for_sheets(text)
+            url = google_workspace.export_to_sheets(title, rows)
+            return f"[C.L.A.I.R.E.] スプレッドシートへ出力しました: {url}"
+        except google_workspace.NotAuthenticatedError as e:
+            return f"[C.L.A.I.R.E.] {e}"
 
     def _handle_code_reply(self, chat_id: str, reply: str) -> str:
         """CODEルートのdevstral応答からACTIONブロックを検出し、モードに応じて処理する。"""
@@ -646,6 +842,26 @@ class Pipe:
         if pending_action is not None and self._is_confirmation(user_text):
             return self._run_action(pending_action)
 
+        # 14日目④: 「Googleドキュメントに出力して」等の発話は、原則として分類・
+        # ルーティングを一切通さずここで直接処理する(CODEルートに乗せてLLMに
+        # google_workspaceを触らせないため。CODE_ACTION_SYSTEM_PROMPTのホワイトリスト外
+        # という制約と対になる)。
+        #
+        # バグ修正: ただし「2026年7月から放送開始したアニメを一覧表で作成し、
+        # スプレッドシートで出力してください」のように、依頼本体とGoogle出力指示が
+        # 同じ発話にまとまっているケースがある。この場合ここで即座に
+        # _handle_google_export_request()を呼んでも、会話履歴に直前のアシスタント応答が
+        # 存在しない(そもそも会話の最初の発言であることが多い)ため、依頼が一度も
+        # 処理されないまま「出力する直前の応答が見つかりませんでした」とだけ返ってしまう。
+        # _has_substantive_remainder()でこの2パターンを切り分け、後者はpending_google_export_target
+        # に控えて通常どおり分類・生成へ進み、生成できたテキストを最後にGoogleへ出力する。
+        google_export_target, google_export_remainder = _split_google_export_request(user_text)
+        pending_google_export_target: str | None = None
+        if google_export_target is not None:
+            if not _has_substantive_remainder(google_export_remainder):
+                return self._handle_google_export_request(body, google_export_target)
+            pending_google_export_target = google_export_target
+
         session = self._get_session(chat_id)
 
         # 11日目④-1: 画像添付があれば、ルーター(Phi-4-mini/gemma4-e4b-cpu)自体には
@@ -653,7 +869,42 @@ class Pipe:
         # (実測で、ルーターは画像に対してハルシネーションを起こしたうえ、
         # gemma4:26b(DEEP)より1.7倍近く遅かった。詳細は11日目ノート④-1参照)。
         images = self._extract_last_user_images(body)
-        force_route = "DEEP" if images else None
+
+        # バグ修正: 上のDEEP強制ルーティングを無条件に適用すると、「この手書きメモを
+        # 表にしてExcelに出力して」のように画像添付+実ファイル生成(③資料生成、
+        # router_rules.CODE_TRIGGERS)が組み合わさった依頼が常にDEEPへ押し込まれ、
+        # Markdownの表を返すだけで終わってしまう(CODE_TRIGGERSの判定自体が一度も
+        # 実行されないため、実際のxlsx/docx/pptxが作られない)。
+        # CODEモデル(devstral)は画像を読めないので、この組み合わせの時だけ二段構えにする:
+        #   1. DEEP(gemma4:26b、vision対応)で画像を構造化テキスト(表)へ変換する
+        #   2. その結果をCODEモデルへの依頼文として渡し、実ファイルを生成させる
+        digitized_image_text: str | None = None
+        force_route: str | None = None
+        if images:
+            requests_local_document = (
+                pending_google_export_target is None
+                and router_rules.match_rule_based(user_text) == "CODE"
+            )
+            if requests_local_document:
+                try:
+                    router.ensure_model_ready("DEEP")
+                    digitized_image_text = generate(
+                        model=router.ROUTE_MODEL_MAP["DEEP"],
+                        prompt=user_text,
+                        system=TABLE_FORMAT_SYSTEM_PROMPT,
+                        images=images,
+                        think=router.ROUTE_THINK_MAP.get("DEEP"),
+                    )
+                except OllamaError:
+                    digitized_image_text = None  # 失敗時は従来どおりDEEPへフォールバック
+            force_route = "CODE" if digitized_image_text else "DEEP"
+        if pending_google_export_target is not None and force_route is None:
+            # バグ修正: router_rules.CODE_TRIGGERSは「スプレッドシート」+依頼動詞にも
+            # 一致するため、素通りさせるとCODEルートに振られてローカルの.xlsxを
+            # 作ろうとしてしまう(③の資料生成と競合する)。ここでの目的はあくまで
+            # Google Sheets/Docsへその場でテキスト/表を出力することであり、
+            # ローカルファイル生成は不要なため、DEEPへ強制する。
+            force_route = "DEEP"
 
         # 13日目「直近添付ファイルを自動優先」対応: 📎の文書添付直後のターンかどうかを
         # 取り出しておき、下の_recall()呼び出しへ渡す(ルーティング自体には関与しない)。
@@ -701,7 +952,9 @@ class Pipe:
 
         # 9日目④: FAST/DEEPかつ呼び出し側がストリーミングを望む場合は、
         # ここでIteratorを返して以降の「全文を待つ」経路には入らない。
-        if self._should_stream(body, route):
+        # バグ修正: pending_google_export_targetがある場合は、Googleへ出力する前に
+        # 全文が確定している必要があるため、ストリーミングを使わせない。
+        if pending_google_export_target is None and self._should_stream(body, route):
             return self._stream_reply(
                 chat_id,
                 route,
@@ -720,9 +973,20 @@ class Pipe:
                 # 記憶/Web検索の文脈は上書きせず連結する(⑤の注意点。上書きするとACTIONブロック
                 # 機能が壊れる)。
                 system_prompt = _combine_system_prompts(CODE_ACTION_SYSTEM_PROMPT, context)
+                # バグ修正: digitized_image_textがあれば(画像添付+実ファイル生成の組み合わせ)、
+                # devstral(CODEモデル)は画像を読めないため、代わりにDEEPが画像から読み取った
+                # 内容をそのまま依頼文へ含めて渡す。
+                code_prompt = user_text
+                if digitized_image_text:
+                    code_prompt = (
+                        f"{user_text}\n\n"
+                        "(添付画像から読み取った内容は以下の通りです。この内容を元に"
+                        "ファイルを作成してください)\n"
+                        f"{digitized_image_text}"
+                    )
                 reply = generate(
                     model=target_model,
-                    prompt=user_text,
+                    prompt=code_prompt,
                     system=system_prompt,
                     think=router.ROUTE_THINK_MAP.get(route),
                 )
@@ -730,8 +994,13 @@ class Pipe:
                 # images: 11日目④-1。DEEPが非ストリーミング(streaming_mode="off"等)で
                 # 呼ばれた場合でも画像を渡せるよう、ここでも後方互換のoptional引数として渡す。
                 # 12日目追記: 画像添付ターンだけTABLE_FORMAT_SYSTEM_PROMPTを足す(理由は定義箇所参照)。
+                # バグ修正: pending_google_export_target=="sheets"のときも同様に表形式を
+                # 促す(画像が無くても「一覧表」等のテキストのみの依頼はあるため)。加えて、
+                # 「出力しました」のような誤った発言を防ぐGOOGLE_EXPORT_COMBINED_SYSTEM_PROMPTを足す。
                 system_prompt = _combine_system_prompts(
-                    TABLE_FORMAT_SYSTEM_PROMPT if images else None, context
+                    TABLE_FORMAT_SYSTEM_PROMPT if (images or pending_google_export_target == "sheets") else None,
+                    GOOGLE_EXPORT_COMBINED_SYSTEM_PROMPT if pending_google_export_target else None,
+                    context,
                 )
                 reply = generate(
                     model=target_model,
@@ -750,5 +1019,12 @@ class Pipe:
 
         if route == "CODE":
             reply = self._handle_code_reply(chat_id, reply)
+
+        # バグ修正: 依頼本体とGoogle出力指示が同じ発話にまとまっていた場合、ここで
+        # 生成できたばかりのテキストをGoogleへ出力する(_handle_google_export_requestの
+        # 「直前の応答」ではなく、いま生成したreplyそのものを渡す点が異なる)。
+        if pending_google_export_target is not None:
+            export_message = self._export_text_to_google(reply, pending_google_export_target)
+            return f"{error_prefix}{debug_prefix}{reply}{citations}\n\n{export_message}"
 
         return f"{error_prefix}{debug_prefix}{reply}{citations}"

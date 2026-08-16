@@ -119,6 +119,8 @@ RAG_MEMORY_DIR = SCRIPT_DIR / "rag_memory"
 if str(RAG_MEMORY_DIR) not in sys.path:
     sys.path.insert(0, str(RAG_MEMORY_DIR))
 
+import code_executor  # noqa: E402 - 14日目③: /artifacts系のパス解決(resolve_safe_path)に使う
+import google_workspace  # noqa: E402 - 14日目④: /google系のGoogle Docs/Sheets/Drive出力
 from router import ROUTER_MODEL  # noqa: E402 - 14日目③:タイトル要約に使う常駐・軽量モデル
 from sentence_splitter import SentenceSplitter  # noqa: E402
 from session_store import Session, SessionStore  # noqa: E402 - 14日目②:チャット履歴の永続化
@@ -707,6 +709,85 @@ def create_app(
         session_store.delete_session(session_id)
         return {"session_id": session_id, "deleted": True}
 
+    # 14日目③: 資料・コード生成(Excel/PowerPoint/Word/JSON)の生成物一覧・ダウンロード。
+    # code_executor.execute_python_file()がworkspace/へ書き出したファイルを、
+    # static/index.htmlのチップ/サイドバー「🗂 生成物」から取得できるようにする。
+    @app.get("/artifacts")
+    def list_artifacts_endpoint():
+        """workspace/配下の生成物一覧(name/size/modified)。UIのサイドバー描画用。"""
+        ws = code_executor.WORKSPACE_DIR
+        if not ws.exists():
+            return []
+        items = [
+            {
+                "filename": str(p.relative_to(ws)),
+                "size": p.stat().st_size,
+                "modified": datetime.fromtimestamp(p.stat().st_mtime).isoformat(),
+            }
+            for p in ws.rglob("*")
+            if p.is_file()
+        ]
+        return sorted(items, key=lambda x: x["modified"], reverse=True)
+
+    @app.get("/artifacts/{filename:path}")
+    def download_artifact_endpoint(filename: str):
+        """生成物のダウンロード。
+
+        パス解決はcode_executor.resolve_safe_path()を再利用する。自前でパスを
+        組み立てると"../voice_gateway.py"のようなworkspace外のファイルを配信して
+        しまうため、④のGoogle認証トークン保護にも関わる既存の安全境界を必ず使い回す
+        (UnsafePathErrorのときも存在を漏らさないよう404で応答する)。
+        """
+        try:
+            target = code_executor.resolve_safe_path(filename, code_executor.WORKSPACE_DIR)
+        except code_executor.UnsafePathError:
+            raise HTTPException(status_code=404, detail="not found")
+        if not target.is_file():
+            raise HTTPException(status_code=404, detail="not found")
+        return FileResponse(str(target), filename=target.name)
+
+    # 14日目④: Google Workspace連携(調査レポートのDocs/Sheets出力・生成物のDriveアップロード)。
+    # google_workspace.py参照。LLMからは呼ばせず、必ずこのHTTP経路経由でのみ実行する。
+    @app.get("/google/status")
+    def google_status_endpoint():
+        """UIが「未認証の案内」を出すか判断するための軽量チェック。
+
+        google_workspace.check_status()はget_credentials()を呼ばないため、
+        ここでブラウザ同意が勝手に開くことはない。
+        """
+        return google_workspace.check_status()
+
+    @app.post("/google/export")
+    def google_export_endpoint(body: dict):
+        """直前のアシスタント応答、または生成物をGoogleへ出力し、URLを返す。
+
+        body: {target: "docs"|"sheets"|"drive", text?, title?, rows?, artifact?}
+        """
+        target = body.get("target")
+        title = body.get("title") or "C.L.A.I.R.E. 出力"
+        try:
+            if target == "docs":
+                url = google_workspace.export_to_docs(title, body.get("text") or "")
+            elif target == "sheets":
+                url = google_workspace.export_to_sheets(title, body.get("rows") or [])
+            elif target == "drive":
+                artifact = body.get("artifact") or ""
+                try:
+                    resolved = code_executor.resolve_safe_path(artifact, code_executor.WORKSPACE_DIR)
+                except code_executor.UnsafePathError:
+                    raise HTTPException(status_code=404, detail="not found")
+                if not resolved.is_file():
+                    raise HTTPException(status_code=404, detail="not found")
+                url = google_workspace.upload_to_drive(resolved)
+            else:
+                raise HTTPException(
+                    status_code=400, detail=f'target は "docs"/"sheets"/"drive" のいずれかです: {target}'
+                )
+        except google_workspace.NotAuthenticatedError as e:
+            # 例外スタックトレースを見せず、UIが再認証を促せる日本語メッセージだけを返す。
+            raise HTTPException(status_code=401, detail=str(e)) from e
+        return {"url": url}
+
     # 15日目(指示1): ウェイクワード検出が実際に効いているか不安、という声を受けて、
     # 「クレア/ねえクレア」を検出した瞬間に固定の音声応答を即座に返す(LLM応答を待たない)。
     # 音声そのものはconnectionをまたいで使い回せるので、create_app()スコープ(=このFastAPI
@@ -891,6 +972,22 @@ def create_app(
             # 下のtext_input分岐からrun_turn()が呼ばれる)。
             # "final": True(2026-08-12追加)は、VADが発話終了を検知しfaster-whisperの
             # 確定転写が終わった瞬間を外部(ws_e2e_bench.py)が識別するためのフラグ。
+            #
+            # 20日目 修正: 「Hey, C.L.A.I.R.E.」のようにウェイクワード単体で発話すると、
+            # `_check_wake_word`が呼ぶ`force_finalize_pending()`がその場でこの`on_final`を
+            # 同じ生テキストで再度呼ぶ(`_wake_force_finalizing`のdocstring参照)。この再入時、
+            # 従来はここが無条件に生テキストのままpartial_transcript(final=true)を送っていたため、
+            # 直前の`wake_detected`でtext_after(トリム済み)へ書き換わった入力欄が生の
+            # ウェイクワード文字列で再び上書きされ、かつこの時点では`wakeArmed`が既にtrueに
+            # なっているため、クライアント側の自動送信ゲートを素通りしてウェイクワードの
+            # 文字列そのものが誤送信される実バグがあった。
+            # 再入中はウェイクワードのプレフィックスを取り除いてから送る(単体発話なら
+            # 空文字になるので送信自体を抑止し、続けて発話していた場合は後続の本文だけを送る)。
+            if _wake_force_finalizing[0]:
+                detection = detect_wake_word(text)
+                text = detection.text_after if detection is not None else text
+                if not text:
+                    return
             _schedule(send_json({"type": "partial_transcript", "text": text, "final": True}))
             _check_wake_word(text)
 

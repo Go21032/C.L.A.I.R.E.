@@ -124,6 +124,61 @@ class TestExecutePythonFile(unittest.TestCase):
         result = execute_python_file(path, timeout=1)
         self.assertTrue(result.timed_out)
 
+    def test_default_timeout_is_120_seconds(self):
+        # 14日目③: pandas/openpyxlのimport+xlsx書き出しが初回30秒に収まらないことが
+        # あったための延長。デフォルト値そのものを直接見て回帰を防ぐ。
+        import inspect
+
+        sig = inspect.signature(execute_python_file)
+        self.assertEqual(sig.parameters["timeout"].default, 120.0)
+
+
+class TestExecutePythonFileArtifacts(unittest.TestCase):
+    """14日目③: 実行前後のworkspace差分から生成物(artifacts)を検出する。"""
+
+    def setUp(self):
+        self.tmpdir = tempfile.TemporaryDirectory()
+        self.workspace = Path(self.tmpdir.name)
+
+    def tearDown(self):
+        self.tmpdir.cleanup()
+
+    def test_detects_newly_created_file(self):
+        path = self.workspace / "make_report.py"
+        path.write_text(
+            "open('report.txt', 'w', encoding='utf-8').write('ok')\n", encoding="utf-8"
+        )
+        result = execute_python_file(path)
+        self.assertEqual(result.artifacts, ["report.txt"])
+
+    def test_script_itself_is_excluded_from_artifacts(self):
+        # 生成スクリプト自身(make_report.py)は「作られたもの」ではなく足場なので
+        # artifactsに混ざってはいけない(ユーザーが開くべきファイルが分からなくなる)。
+        path = self.workspace / "make_report.py"
+        path.write_text("pass\n", encoding="utf-8")
+        result = execute_python_file(path)
+        self.assertEqual(result.artifacts, [])
+
+    def test_no_artifacts_when_script_creates_nothing(self):
+        path = self.workspace / "noop.py"
+        path.write_text("x = 1\n", encoding="utf-8")
+        result = execute_python_file(path)
+        self.assertEqual(result.artifacts, [])
+
+    def test_artifacts_detected_even_on_timeout(self):
+        # タイムアウトしてプロセスが強制終了されても、途中まで書かれたファイルが
+        # あればartifactsとして拾えること(ユーザーへ「途中経過」を見せられる)。
+        path = self.workspace / "slow_write.py"
+        path.write_text(
+            "import time\n"
+            "open('partial.txt', 'w', encoding='utf-8').write('x')\n"
+            "time.sleep(5)\n",
+            encoding="utf-8",
+        )
+        result = execute_python_file(path, timeout=1)
+        self.assertTrue(result.timed_out)
+        self.assertIn("partial.txt", result.artifacts)
+
 
 if __name__ == "__main__":
     unittest.main()

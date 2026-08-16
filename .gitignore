@@ -2,3 +2,6 @@ __pycache__/
 *.pyc
 scripts/.webui_secret_key
 .webui_secret_key
+
+# 14日目④: Google OAuthクライアント情報・アクセストークン。流出防止のため必ず除外する。
+scripts/secrets/
