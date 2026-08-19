@@ -100,20 +100,61 @@ RECALL_TRIGGERS: list[str] = [
 _RECALL_TRIGGER_RE = re.compile("|".join(RECALL_TRIGGERS), re.IGNORECASE)
 
 
+# 15日目②: 音楽再生の依頼。14日目③の「資料」と同じく、日常会話への誤爆を
+# 避けるため名詞単独では一致させない。「流して」は特に日常会話へ出やすい
+# (「聞き流して」「お湯を流して」)ため、直前に否定的な文脈が無いことを見る。
+#
+# > [!warning] 「流して」の誤爆リスクは「資料」より高い
+# > 14日目③では「資料」「エクセル」が日常会話に出ることを警戒して依頼動詞との
+# > セット判定にした。今回の「流して」は**それ自体が動詞**で、「聞き流して」
+# > 「お湯を流して」「その話は流して」など**否定的・無関係な用法が非常に多い**。
+# > 単純な部分一致では確実に誤爆する。
+# > 幸い①の一致度ガード(15日目⓪-5)が最後の砦になるため「誤爆しても曲は流れない」が、
+# > 誤爆するたびに「見つかりませんでした」と返ってくるのは体験として悪いため、
+# > 否定的な用法(聞き流して/お湯を流して)を除外パターンで明示的に弾く。
+MEDIA_TRIGGERS: list[str] = [
+    # 「聞き流して」「聞き流していい」等、「聞く」の複合語としての「流して」を除外する。
+    r"(?<!聞き)(?<!き)流して",
+    r"(かけて|再生して|聴かせて|聞かせて)",
+]
+
+# 上記MEDIA_TRIGGERSの「流して」は「お湯を流して」「水道を流して」のような
+# 日常会話にも一致してしまうため、直前の名詞で除外する専用パターン。
+_MEDIA_FALSE_POSITIVE_RE = re.compile(r"(お湯|水|水道).{0,2}流して")
+
+_MEDIA_TRIGGER_RE = re.compile("|".join(MEDIA_TRIGGERS), re.IGNORECASE)
+
+
+def is_media_request(text: str) -> bool:
+    """発話が「曲を流して/かけて/再生して」のような音楽再生の依頼かどうかを判定する。
+
+    「今日は一日音楽を聴いていたよ」のような単なる音楽の話題への言及は、
+    MEDIA_TRIGGERSのどの語(依頼動詞)にも一致しないため誤爆しない。
+    """
+    if _MEDIA_FALSE_POSITIVE_RE.search(text):
+        return False
+    return bool(_MEDIA_TRIGGER_RE.search(text))
+
+
 def match_rule_based(text: str) -> str | None:
     """LLM判定の前段で、正規表現により明確に確定できるrouteを返す。
 
     優先順位:
       1. CODE_TRIGGERSに一致すれば"CODE"(既存。4日目ノート参照)
-      2. RECALL_TRIGGERSに一致すれば"FAST"(6日目ノート「マツコ問題」参照。
+      2. is_media_request()に一致すれば"MEDIA"(15日目②。「エクセルを流して」のような
+         字面上の衝突を避けるため、CODEの後に判定する。CODE_TRIGGERSの資料生成トリガーは
+         「流して」を含まないため実際には衝突しない)
+      3. RECALL_TRIGGERSに一致すれば"FAST"(6日目ノート「マツコ問題」参照。
          想起質問がPhi-4-miniによってCLARIFYへ誤判定されるのを防ぐ)
-      3. どちらにも一致しなければNone(呼び出し側がPhi-4-miniによるLLM判定にフォールバック)
+      4. どれにも一致しなければNone(呼び出し側がPhi-4-miniによるLLM判定にフォールバック)
 
     CODEを先にチェックすることで、「前に書いたコードのバグ直して」のような
     想起+コード依頼の複合表現は従来通りCODE優先(4日目の優先度ルール)を維持する。
     """
     if _CODE_TRIGGER_RE.search(text):
         return "CODE"
+    if is_media_request(text):
+        return "MEDIA"
     if _RECALL_TRIGGER_RE.search(text):
         return "FAST"
     return None

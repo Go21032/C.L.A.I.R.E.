@@ -323,6 +323,64 @@ class TestDefaultTimingRecorderCsv(unittest.TestCase):
         self.assertEqual(rows.count(["start_iso", "chat_id", "text", "images_count", "duration_sec"]), 1)
 
 
+class TestMediaPlayedEvent(unittest.TestCase):
+    """15日目③: MEDIAルートで再生した曲の情報をWSへ`media_played`イベントとして送る。
+
+    support_ai_auto_pipe.Pipe.last_media_played(title/artist/url)を、
+    pipe.pipe()の戻り値とは別チャンネルでrun_turn()が拾ってUIへ転送する
+    (14日目④のGoogle出力URLと違い、応答テキスト自体にはURLを含めていないため)。
+    """
+
+    def test_media_played_info_is_forwarded_as_event(self):
+        pipe = FakePipe("Lemon(Kenshi Yonezu)を再生します。")
+        pipe.last_media_played = {
+            "title": "Lemon",
+            "artist": "Kenshi Yonezu",
+            "url": "https://www.youtube.com/watch?v=LgSLygQdHS4",
+        }
+        synthesize, _ = fake_synthesize_factory()
+
+        events = list(
+            run_turn(pipe, "chat-1", "米津玄師のLemonを流して", synthesize=synthesize, splitter_kwargs={"min_chars": 0})
+        )
+
+        media_events = [e for e in events if e["type"] == "media_played"]
+        self.assertEqual(
+            media_events,
+            [
+                {
+                    "type": "media_played",
+                    "title": "Lemon",
+                    "artist": "Kenshi Yonezu",
+                    "url": "https://www.youtube.com/watch?v=LgSLygQdHS4",
+                }
+            ],
+        )
+
+    def test_no_media_played_attribute_yields_no_event(self):
+        """pipe互換オブジェクトがlast_media_played属性を持たなくても落ちない(後方互換)。"""
+        pipe = FakePipe("こんにちは。")
+        synthesize, _ = fake_synthesize_factory()
+
+        events = list(
+            run_turn(pipe, "chat-1", "こんにちは", synthesize=synthesize, splitter_kwargs={"min_chars": 0})
+        )
+
+        self.assertFalse(any(e["type"] == "media_played" for e in events))
+
+    def test_media_played_none_yields_no_event(self):
+        """MEDIA以外のルートではlast_media_played=Noneのままなので、イベントを送らない。"""
+        pipe = FakePipe("普通の応答です。")
+        pipe.last_media_played = None
+        synthesize, _ = fake_synthesize_factory()
+
+        events = list(
+            run_turn(pipe, "chat-1", "こんにちは", synthesize=synthesize, splitter_kwargs={"min_chars": 0})
+        )
+
+        self.assertFalse(any(e["type"] == "media_played" for e in events))
+
+
 class TestNonStreamingReply(unittest.TestCase):
     def test_plain_string_reply_is_still_split_and_spoken(self):
         """CODE/CLARIFYルート等、pipe()がstrを返す経路(9日目④で意図的にストリーミング対象外)。"""

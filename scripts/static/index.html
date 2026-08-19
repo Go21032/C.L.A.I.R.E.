@@ -388,6 +388,35 @@
   }
   .arc-mini { position: relative; width: 64px; height: 64px; flex: none; }
   .arc-mini svg { width: 100%; height: 100%; display: block; }
+
+  /* --- 16日目: クレアの発話中エフェクト(実音量リアクティブな発光+微振動) ---
+     `--voice-level`(0〜1)は playNext() 側のAnalyserNodeから requestAnimationFrame で
+     毎フレーム書き込まれる。state:speaking ではなく「実際に音が鳴っている区間」に同期する
+     (state:speakingは音声キューより先に立つため、無音の間も光り続けてしまう)。
+
+     ★意図的に transform / filter だけで表現している。width/margin/top等を動かすと
+       隣の「ARC CORE」テキストやtok/s統計までガタつく(レイアウトを揺らさない)。 */
+  .arc-mini { --voice-level: 0; }
+  .arc-mini svg {
+    transform: scale(calc(1 + 0.04 * var(--voice-level)));
+    transform-origin: 50% 50%;
+    filter: drop-shadow(0 0 calc(2px + 10px * var(--voice-level))
+                        rgba(94, 234, 255, calc(0.12 + 0.55 * var(--voice-level))));
+    will-change: transform, filter;
+  }
+  /* 振動は「控えめ」方針。最大でも約±1.2pxで、かつ音量が小さい間は自動的にほぼ止まる */
+  .arc-mini.speaking { animation: arc-jitter 0.12s steps(1, end) infinite; }
+  @keyframes arc-jitter {
+    0%   { transform: translate(calc(var(--voice-level) *  1.2px), calc(var(--voice-level) * -0.7px)); }
+    25%  { transform: translate(calc(var(--voice-level) * -0.9px), calc(var(--voice-level) *  1.0px)); }
+    50%  { transform: translate(calc(var(--voice-level) *  0.6px), calc(var(--voice-level) *  0.8px)); }
+    75%  { transform: translate(calc(var(--voice-level) * -1.1px), calc(var(--voice-level) * -0.5px)); }
+    100% { transform: translate(calc(var(--voice-level) *  0.8px), calc(var(--voice-level) *  0.6px)); }
+  }
+  /* 動きに酔う人・OS側で動きを減らす設定の人には振動を出さず、発光だけ残す */
+  @media (prefers-reduced-motion: reduce) {
+    .arc-mini.speaking { animation: none; }
+  }
   .core-text { display: flex; flex-direction: column; gap: 3px; }
   .core-eyebrow { font-family: var(--f-mono); font-size: 9px; color: var(--text-muted); letter-spacing: 0.28em; text-transform: uppercase; }
   .core-title { font-family: var(--f-display); font-size: 16px; font-weight: 700; color: var(--text-primary); letter-spacing: 0.14em; }
@@ -1044,6 +1073,12 @@ let lastKnownDocs = [];  // renderKnowledgeList()の再描画(ピン状態反映
 let artifactsSnapshotBeforeTurn = new Set();
 let lastFinalizedTurnEl = null;  // 14日目③④: 1ターンにつき1回だけチップ/ボタンを付けるためのガード
 
+// 15日目③: MEDIAルートで再生した曲({title, artist, url})。media_playedイベントは
+// sentenceイベントより前に届く(voice_gateway.run_turn参照)ためassistantTurnElが
+// まだ無いことが多く、14日目③④の生成物チップ・Google出力ボタンと同様に
+// 応答確定(state:idle)のタイミングでまとめて描画する(finalizeAssistantTurnUI参照)。
+let pendingMediaPlayed = null;
+
 // 14日目②: チャット履歴の永続化(New Session・リネーム・削除・検索)。
 // chat_id(RAG記憶のキー)とsession_id(画面の会話)を一致させるため、選択中のIDを
 // localStorageへ持ち、WS接続のたびに"select_session"メッセージでサーバへ伝える(connect参照)。
@@ -1089,6 +1124,7 @@ function cancelTurn() {
   if (currentAudio) { try { currentAudio.pause(); } catch (e) { /* noop */ } }
   isPlaying = false;
   currentAudio = null;
+  stopVoiceLevelLoop(); // 16日目: pause()では"ended"が飛ばないので明示的にエフェクトを止める
   // 17日目: サーバー側の生成そのものを打ち切る要求を送る(上のコメント参照)。
   // WS未接続時は何もできないので送らない(ローカルの無視フラグだけで見た目は止まる)。
   if (ws && ws.readyState === WebSocket.OPEN) {
@@ -1104,6 +1140,7 @@ function stopSpeechOnly() {
   if (currentAudio) { try { currentAudio.pause(); } catch (e) { /* noop */ } }
   isPlaying = false;
   currentAudio = null;
+  stopVoiceLevelLoop(); // 16日目: 同上(読み上げ停止ボタンでもロゴを平常状態へ戻す)
   console.log(`[stop-speech] ${new Date().toISOString()}: 読み上げを停止`);
   updateMicMute();
   updateTurnControlButtons();
@@ -1177,6 +1214,88 @@ let isPlaying = false;
 let playbackRate = 1.0;
 let currentAudio = null; // 再生速度スライダーを動かした瞬間に「今流れている音声」へも反映するため保持
 
+// === 16日目: 発話中のロゴエフェクト(実音量リアクティブ) ======================
+// 読み上げ中の<audio>を AnalyserNode に通して振幅(RMS)を取り出し、CSS変数
+// `--voice-level`(0〜1)として .arc-mini(ARC COREの左隣のロゴ)へ毎フレーム流し込む。
+//
+// 設計上の約束:
+//   - **エフェクトのために読み上げを死なせない**。解析への接続はすべてtry/catchで囲み、
+//     失敗したらエフェクトを諦めて素の再生にフォールバックする。
+//   - マイク用の`audioCtx`(startMic内で生成)は**再利用しない**。マイクを起動して
+//     いなくてもテキスト入力の読み上げは鳴るため、ライフサイクルを独立させる。
+const arcMiniEl = document.querySelector(".arc-mini");
+let ttsCtx = null;        // 読み上げ解析専用のAudioContext
+let ttsAnalyser = null;
+let ttsLevelRaf = 0;      // requestAnimationFrameのID(0 = 停止中)
+let ttsLevel = 0;         // 平滑化後のレベル 0〜1
+
+function ensureTtsAnalyser() {
+  if (ttsAnalyser) return ttsAnalyser;
+  const Ctx = window.AudioContext || window.webkitAudioContext;
+  if (!Ctx) return null;  // 非対応ブラウザではエフェクトなしで動かす
+  ttsCtx = new Ctx();
+  ttsAnalyser = ttsCtx.createAnalyser();
+  ttsAnalyser.fftSize = 1024;
+  ttsAnalyser.smoothingTimeConstant = 0.6;
+  // ★最重要: createMediaElementSource()で<audio>をグラフへ引き込んだ後、
+  //   destinationまで繋がっていないと音が「完全に無音」になる。ここを忘れないこと。
+  ttsAnalyser.connect(ttsCtx.destination);
+  return ttsAnalyser;
+}
+
+// <audio>を解析グラフへ接続する。成功したらMediaElementSourceNodeを返す(失敗時はnull)。
+function connectAudioToAnalyser(audio) {
+  try {
+    const analyser = ensureTtsAnalyser();
+    if (!analyser) return null;
+    // 自動再生ポリシーによりsuspendedで生成されることがある(この状態だと無音になる)
+    if (ttsCtx.state === "suspended") ttsCtx.resume();
+    // createMediaElementSource()は1要素につき1回しか呼べない。playNext()は文ごとに
+    // new Audio()を作るので、ここで毎回作って ended 時にdisconnectする。
+    const source = ttsCtx.createMediaElementSource(audio);
+    source.connect(analyser);
+    return source;
+  } catch (e) {
+    console.warn("[16日目] 音量解析へ接続できませんでした(エフェクトなしで再生します):", e);
+    return null;
+  }
+}
+
+function startVoiceLevelLoop() {
+  if (ttsLevelRaf || !ttsAnalyser || !arcMiniEl) return;
+  const buf = new Uint8Array(ttsAnalyser.fftSize);
+  arcMiniEl.classList.add("speaking");
+  const tick = () => {
+    ttsAnalyser.getByteTimeDomainData(buf);
+    let sum = 0;
+    for (let i = 0; i < buf.length; i++) {
+      const v = (buf[i] - 128) / 128;
+      sum += v * v;
+    }
+    const rms = Math.sqrt(sum / buf.length);
+    const target = Math.min(1, rms * 3.2); // VOICEVOXの通常音量が0〜1に収まるゲイン
+    // アタックは速く・リリースは遅く。子音の立ち上がりに追従しつつ、
+    // 母音の谷でロゴが毎回真っ暗になる「チカチカ」を防ぐ。
+    ttsLevel += (target - ttsLevel) * (target > ttsLevel ? 0.55 : 0.12);
+    arcMiniEl.style.setProperty("--voice-level", ttsLevel.toFixed(3));
+    ttsLevelRaf = requestAnimationFrame(tick);
+  };
+  ttsLevelRaf = requestAnimationFrame(tick);
+}
+
+// 再生キューが空になったとき・中断されたときに必ず呼ぶ(rAFを回しっぱなしにしない)。
+function stopVoiceLevelLoop() {
+  if (ttsLevelRaf) {
+    cancelAnimationFrame(ttsLevelRaf);
+    ttsLevelRaf = 0;
+  }
+  ttsLevel = 0;
+  if (arcMiniEl) {
+    arcMiniEl.classList.remove("speaking");
+    arcMiniEl.style.setProperty("--voice-level", "0");
+  }
+}
+
 function enqueueAudio(wavBase64) {
   playbackQueue.push(wavBase64);
   if (!isPlaying) playNext();
@@ -1187,6 +1306,7 @@ function playNext() {
   if (next === undefined) {
     isPlaying = false;
     currentAudio = null;
+    stopVoiceLevelLoop(); // 16日目: 音が鳴り終わったのでロゴのエフェクトも消す
     updateMicMute(); // 再生キューが空になったので、state次第で聞き取りを再開する
     updateTurnControlButtons(); // 16日目 修正2: 再生が無くなったら読み上げ停止ボタンを無効化
     return;
@@ -1198,12 +1318,27 @@ function playNext() {
   const audio = new Audio(`data:audio/wav;base64,${next}`);
   audio.playbackRate = playbackRate; // 15日目(指示3): 読み上げ速度バーの現在値を毎回適用する
   currentAudio = audio;
-  audio.addEventListener("ended", playNext);
+
+  // 16日目: 実音量に反応するロゴエフェクト。接続できたときだけrAFループを回す
+  // (接続に失敗してもnullが返るだけで、以降の再生処理には一切影響しない)。
+  const analyserSource = connectAudioToAnalyser(audio);
+  if (analyserSource) startVoiceLevelLoop();
+  const releaseAnalyser = () => {
+    if (!analyserSource) return;
+    try { analyserSource.disconnect(); } catch (e) { /* noop */ }
+  };
+
+  audio.addEventListener("ended", () => {
+    releaseAnalyser();
+    playNext();
+  });
   audio.addEventListener("error", (e) => {
+    releaseAnalyser();
     logError(`audio再生に失敗: ${e?.message || e}`);
     playNext();
   });
   audio.play().catch((e) => {
+    releaseAnalyser();
     logError(`audio.play()に失敗(自動再生ブロックの可能性): ${e}`);
     playNext();
   });
@@ -1342,6 +1477,12 @@ function handleMessage(msg) {
       // 14日目③④: 応答が完全に返り終えたタイミング(idle)で、生成物チップと
       // Google出力ボタンをこのターンの応答の下に1回だけ付ける。
       if (msg.value === "idle") finalizeAssistantTurnUI();
+      break;
+
+    case "media_played":
+      // 15日目③: MEDIAルートで実際に再生された曲。応答確定時(idle)に
+      // finalizeAssistantTurnUI()がpendingMediaPlayedを見てチップを付ける。
+      pendingMediaPlayed = { title: msg.title, artist: msg.artist, url: msg.url };
       break;
 
     case "error":
@@ -1899,6 +2040,25 @@ async function checkNewArtifactsAfterTurn(turnEl) {
   container.appendChild(row);
 }
 
+// --- 音楽再生の結果チップ(15日目③) -----------------------------------------
+// support_ai_auto_pipe.Pipeの MEDIA ルート(media_player.play_song)が再生した曲を
+// 「🎵 曲名 / アーティスト」のリンクチップとして応答の下に表示する。
+// 14日目④のGoogle出力チップ(appendGoogleResultChip)と同じ「行を1つ作ってchip-linkを
+// ぶら下げる」構成をそのまま再利用する。
+function appendMediaPlayedChip(turnEl, info) {
+  const container = getOrCreateTurnActionsEl(turnEl);
+  const row = document.createElement("div");
+  row.className = "attach-row media-played-row";
+  const chip = document.createElement("a");
+  chip.className = "chip chip-link";
+  chip.href = info.url;
+  chip.target = "_blank";
+  chip.rel = "noopener";
+  chip.textContent = `🎵 ${info.title} / ${info.artist}`;
+  row.appendChild(chip);
+  container.appendChild(row);
+}
+
 // --- Google Workspace連携(14日目④) ---------------------------------------
 // voice_gateway.py の GET /google/status・POST /google/export を叩く。
 // LLM(devstral)からは呼ばせない(CODE_ACTION_SYSTEM_PROMPTのホワイトリスト外)ため、
@@ -2008,6 +2168,12 @@ function finalizeAssistantTurnUI() {
   lastFinalizedTurnEl = assistantTurnEl;
   appendGoogleExportButtons(assistantTurnEl);
   checkNewArtifactsAfterTurn(assistantTurnEl);
+  // 15日目③: media_playedイベントを受け取っていれば、このターンの応答の下に
+  // 再生した曲のチップを1回だけ付ける。
+  if (pendingMediaPlayed) {
+    appendMediaPlayedChip(assistantTurnEl, pendingMediaPlayed);
+    pendingMediaPlayed = null;
+  }
 }
 
 knowledgeBtn.addEventListener("click", () => {

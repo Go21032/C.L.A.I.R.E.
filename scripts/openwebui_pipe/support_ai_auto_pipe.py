@@ -73,6 +73,7 @@ if str(ROUTER_SCRIPTS_DIR) not in sys.path:
 
 import code_executor  # noqa: E402
 import google_workspace  # noqa: E402 - 14日目④: 発話での「Googleドキュメントに出力」トリガー
+import media_player  # noqa: E402 - 15日目②: MEDIAルート(音楽再生)。LLMからは呼ばせない
 import router  # noqa: E402
 import router_rules  # noqa: E402 - バグ修正: 画像+実ファイル生成の組み合わせ検出に使う
 import web_search  # noqa: E402 - 14日目: 13日目④で部品実装のみ区切っていたWeb検索を結線する
@@ -342,6 +343,13 @@ class Pipe:
         # そうでなければ(話題が変わった等)破棄する。
         self._pending_actions: dict[str, code_executor.CodeAction] = {}
 
+        # 15日目③: MEDIAルートで実際に再生した曲の情報(title/artist/url)。
+        # pipe()の戻り値は文字列(またはIterator[str])のため、UIチップ表示用の
+        # 構造化データはこの属性経由でvoice_gateway.run_turn()に読ませる
+        # (google_workspaceのURLと違い、応答テキストにURLを含めていないため)。
+        # 毎ターンpipe()の先頭でNoneにリセットする(前のターンの値を引きずらない)。
+        self.last_media_played: dict[str, str] | None = None
+
     def _get_session(self, chat_id: str) -> router.RouterSession:
         if chat_id not in self._sessions:
             self._sessions[chat_id] = router.RouterSession()
@@ -516,6 +524,24 @@ class Pipe:
         if result.artifacts:
             lines.append("📄 生成物: " + ", ".join(result.artifacts))
         return "\n".join(lines)
+
+    def _handle_media_request(self, user_text: str) -> str:
+        """15日目②: 「〇〇を流して」等のMEDIAルートの処理本体。
+
+        media_player.play_song()を直接呼び、成功すればlast_media_playedへ
+        title/artist/urlを記録する(③のUIチップ表示用。voice_gateway.pyが読む)。
+        MediaPlayerError系(SongNotFoundError/BraveNotFoundError)はどちらも
+        日本語メッセージを持つため、そのままユーザーへ返す(黙って失敗させない)。
+        """
+        song_name = media_player.extract_song_name(user_text)
+        try:
+            song = media_player.play_song(song_name)
+        except media_player.SongNotFoundError:
+            return f"「{song_name}」という曲が見つかりませんでした。"
+        except media_player.BraveNotFoundError as e:
+            return str(e)
+        self.last_media_played = {"title": song.title, "artist": song.artist, "url": song.url}
+        return f"{song.title}({song.artist})を再生します。"
 
     def _handle_google_export_request(self, body: dict, target: str) -> str:
         """14日目④: 発話での「Googleドキュメントに出力して」(単独)トリガーへの応答。
@@ -815,6 +841,10 @@ class Pipe:
         if not user_text.strip():
             return "(質問内容が空でした。もう一度入力してください)"
 
+        # 15日目③: 前のターンのチップ情報を引きずらないよう、このターンの
+        # 冒頭で必ずリセットする(MEDIAルートを通ったときだけ改めてセットする)。
+        self.last_media_played = None
+
         # 6日目⑧-2「マツコ問題」の根本原因への対応:
         # Open WebUIの「タスクモデル」が「現在のモデル」(=このPipe自身)になっていると、
         # タイトル生成・タグ生成・フォローアップ生成といったOpen WebUI内部のユーティリティ
@@ -924,6 +954,13 @@ class Pipe:
             )
 
         debug_prefix = f"[route: {route}]\n" if self.valves.show_route_debug_prefix else ""
+
+        if route == "MEDIA":
+            # 15日目②: LLMを一切通さず media_player を直接呼ぶ(14日目④の
+            # google_workspaceと同じで、外部を操作するのはPython側の決まった
+            # 関数だけ)。router_rules.MEDIA_TRIGGERSが誤爆しても、①の一致度
+            # ガード(15日目⓪-5)により無関係な曲が再生されることはない。
+            return f"{error_prefix}{debug_prefix}{self._handle_media_request(user_text)}"
 
         if route == "CLARIFY":
             clarify_prompt = (

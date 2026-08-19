@@ -1,0 +1,45 @@
+{
+  "session_id": "sess-20260816-230003-8387",
+  "title": "アベンジャーズ、Doom製のテーマ曲を流して",
+  "created_at": "2026-08-16T23:00:03.911538",
+  "updated_at": "2026-08-16T23:01:27.806859",
+  "title_is_custom": false,
+  "turns": [
+    {
+      "role": "user",
+      "text": "アベンジャーズ、Doom製のテーマ曲を流して",
+      "route": "",
+      "ts": "2026-08-16T23:00:48.553532"
+    },
+    {
+      "role": "assistant",
+      "text": "「アベンジャーズ、Doom製 テーマ曲」という曲が見つかりませんでした。",
+      "route": "",
+      "ts": "2026-08-16T23:00:51.155729"
+    },
+    {
+      "role": "user",
+      "text": "Avengers Doomsday | Official Theme | EPIC VERSIONを流して",
+      "route": "",
+      "ts": "2026-08-16T23:00:59.696346"
+    },
+    {
+      "role": "assistant",
+      "text": "Avengers Doomsday Theme を再生します。",
+      "route": "",
+      "ts": "2026-08-16T23:01:01.729582"
+    },
+    {
+      "role": "user",
+      "text": "Avengers Doomsday Theme | EPIC TRAILER 2 MUSIC - Special Lookを流して",
+      "route": "",
+      "ts": "2026-08-16T23:01:25.761653"
+    },
+    {
+      "role": "assistant",
+      "text": "Avengers Doomsday Theme を再生します。",
+      "route": "",
+      "ts": "2026-08-16T23:01:27.806859"
+    }
+  ]
+}

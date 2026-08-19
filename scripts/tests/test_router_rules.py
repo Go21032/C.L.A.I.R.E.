@@ -4,7 +4,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from router_rules import match_rule_based
+from router_rules import is_media_request, match_rule_based
 
 
 class TestMatchRuleBased(unittest.TestCase):
@@ -138,6 +138,47 @@ class TestDocumentGenerationTriggers(unittest.TestCase):
 
     def test_casual_mention_of_excel_skill_is_not_code(self):
         self.assertIsNone(match_rule_based("エクセルって難しいよね"))
+
+
+class TestMediaTriggers(unittest.TestCase):
+    """15日目②: 音楽再生の依頼がMEDIAルートへ飛ぶこと。
+
+    14日目③の教訓: ここが通らないと①の実装は一度も実行されない。
+    """
+
+    def test_play_request_is_media(self):
+        self.assertTrue(is_media_request("米津玄師のLemonを流して"))
+
+    def test_kakete_is_media(self):
+        self.assertTrue(is_media_request("アイドルをかけて"))
+
+    def test_saisei_is_media(self):
+        self.assertTrue(is_media_request("夜に駆けるを再生して"))
+
+    def test_kikasete_is_media(self):
+        self.assertTrue(is_media_request("マリーゴールドを聴かせて"))
+
+    # 誤爆しないこと(「流して」は日常会話に出るので、ここが特に重要)
+    def test_kikinagashi_is_not_media(self):
+        self.assertFalse(is_media_request("その話は聞き流していいよ"))
+
+    def test_casual_music_mention_is_not_media(self):
+        self.assertFalse(is_media_request("今日は一日音楽を聴いていたよ"))
+
+    def test_water_flow_is_not_media(self):
+        self.assertFalse(is_media_request("お風呂のお湯を流しておいて"))
+
+    def test_match_rule_based_returns_media_route(self):
+        self.assertEqual(match_rule_based("米津玄師のLemonを流して"), "MEDIA")
+
+    def test_match_rule_based_does_not_misfire_on_kikinagashi(self):
+        self.assertIsNone(match_rule_based("その話は聞き流していいよ"))
+
+    def test_code_request_still_prioritizes_code_over_media(self):
+        # 「エクセルを流して」のような字面上の衝突が起きても、CODEの
+        # ドキュメント生成トリガー(依頼動詞とセット)には「流して」は含まれて
+        # いないため、そもそも衝突しないことの回帰チェック。
+        self.assertEqual(match_rule_based("今の調査結果をエクセルにまとめて"), "CODE")
 
 
 if __name__ == "__main__":

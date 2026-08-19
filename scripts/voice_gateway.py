@@ -39,6 +39,11 @@ WSメッセージ仕様(JSON。サーバ → クライアント):
     {"type": "audio", "text": str, "wav_b64": str}                # 1文ぶんのTTS wav(base64)
     {"type": "state", "value": "listening"|"thinking"|"speaking"|"idle"}
     {"type": "error", "stage": str, "message": str}
+    {"type": "media_played", "title": str, "artist": str, "url": str}  # 15日目③: MEDIAルートで
+                                                                    # 実際に再生した曲(support_ai_auto_pipe.
+                                                                    # Pipe.last_media_played)。UIが応答の下へ
+                                                                    # 🎵チップとして表示する(static/index.html)。
+                                                                    # MEDIA以外のルートでは送られない。
 
 WSメッセージ仕様(クライアント → サーバ。既存はバイナリ音声フレームのみ):
     {"type": "text_input", "text": str, "images": [str, ...], "attached_document": str, "web_search": bool}
@@ -451,6 +456,15 @@ def run_turn(
         _record_timing()
         yield {"type": "state", "value": "idle"}
         return
+
+    # 15日目③: MEDIAルートで曲を再生していれば、応答テキストとは別チャンネル
+    # (support_ai_auto_pipe.Pipe.last_media_played)からtitle/artist/urlを拾い、
+    # UIチップ表示用に転送する。pipe互換オブジェクトがこの属性を持たない場合
+    # (FakePipe等の最小フェイク・後方互換)やNoneのままの場合(MEDIA以外のルート)は
+    # 何も送らない。
+    media_played = getattr(pipe, "last_media_played", None)
+    if media_played:
+        yield {"type": "media_played", **media_played}
 
     if _cancelled():
         # 17日目: pipe.pipe()から戻った直後、最初のトークンを取り出す前に
